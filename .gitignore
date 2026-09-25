@@ -1,0 +1,11 @@
+/.omx/
+/.omo/
+/.playwright-mcp/
+/.codegraph
+/.agents/
+/.codex/
+/app/node_modules/
+/app/dist/
+/app/.env
+/app/.env.*
+!/app/.env.example
