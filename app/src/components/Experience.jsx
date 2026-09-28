@@ -4,7 +4,7 @@
 
 import { Avatar } from './Avatar';
 
-export function Experience({ audioLipSync }) {
+export function Experience({ audioLipSync, model, idleAnimation, greetingAnimation }) {
   return (
     <>
       <ambientLight intensity={1.5} />
@@ -12,6 +12,9 @@ export function Experience({ audioLipSync }) {
       <directionalLight position={[-5, 2, 3]} intensity={1.2} color="#a99aff" />
       <Avatar
         audioLipSync={audioLipSync}
+        model={model}
+        idleAnimation={idleAnimation}
+        greetingAnimation={greetingAnimation}
         position={[0, -3.5, 5]}
         scale={2}
       />

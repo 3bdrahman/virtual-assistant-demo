@@ -1,5 +1,5 @@
 /**
- * Audio playback queue with phoneme-timestamp-driven lip-sync.
+ * Audio playback with estimated text-driven lip-sync.
  *
  * Uses a text timeline modulated by the playback volume for NVIDIA WAV
  * audio, and the same timeline with estimated timing for browser speech.
@@ -115,7 +115,7 @@ const CHAR_TO_VISEME = {
 
 const DEFAULT_VISEME = VISEMES.aa;
 
-// Phoneme duration weights for realistic speech timing (used when timestamps unavailable)
+// Character-derived viseme duration weights for estimated speech timing.
 const PHONEME_WEIGHTS = {
   [VISEMES.sil]: 1.4,
   [VISEMES.aa]:  2.4,
@@ -134,10 +134,12 @@ const PHONEME_WEIGHTS = {
   [VISEMES.kk]:  0.6,
 };
 
-// Critically-damped EMA: factor = 1 - exp(-dt/tau). Frame-rate-independent.
+// Spring response constants used by the frame-rate-independent dampers.
 const SMOOTH_ATTACK_TAU  = 0.045;
 const SMOOTH_RELEASE_TAU = 0.110;
 const SMOOTH_SIL_TAU     = 0.150;
+const PLAYBACK_DECODE_TIMEOUT_MS = 15_000;
+const MALE_VOICE_NAME_PATTERN = /\bmale\b/i;
 
 import { SpringDamper } from '../utils/springDamper.js';
 
@@ -159,7 +161,8 @@ export class AudioLipSync {
     this.onPlaybackError = null;
     this.onSpeechError = null;
     this._animFrame = null;
-    this._frequencyData = null;
+    this._waveformData = null;
+    this._ownsAudioContext = false;
 
     this._audioStartCtxTime = 0;
 
@@ -177,6 +180,10 @@ export class AudioLipSync {
     this._speechGeneration = 0;
     this._playbackGeneration = 0;
     this._activeUtterance = null;
+    this._speechTimeout = null;
+    this._playbackDecodeTimeout = null;
+    this._rejectPlaybackDecode = null;
+    this._playbackDecodeDeadline = null;
 
   }
 
@@ -184,10 +191,11 @@ export class AudioLipSync {
     if (!this.audioContext) {
       const AudioCtx = window.AudioContext || window.webkitAudioContext;
       this.audioContext = new AudioCtx();
+      this._ownsAudioContext = true;
       this.analyser = this.audioContext.createAnalyser();
       this.analyser.fftSize = 2048;
       this.analyser.smoothingTimeConstant = 0.4;
-      this._frequencyData = new Uint8Array(this.analyser.frequencyBinCount);
+      this._waveformData = new Float32Array(this.analyser.fftSize);
     }
   }
 
@@ -203,7 +211,12 @@ export class AudioLipSync {
    * Build an estimated viseme timeline from text using weighted durations.
    */
   _buildTextTimeline(text) {
-    const clean = (text || '').toLowerCase().replace(/[^a-z\s]/g, ' ');
+    const clean = Array.from(text || '', (character) => {
+      const lower = character.toLowerCase();
+      if (CHAR_TO_VISEME[lower] || /\s/.test(lower)) return lower;
+      if (/[.,?!;:'"()-]/.test(lower)) return ' ';
+      return '*';
+    }).join('');
     const items = [];
     let idx = 0;
     while (idx < clean.length) {
@@ -219,7 +232,7 @@ export class AudioLipSync {
       idx++;
     }
 
-    let totalWeight = items.reduce((sum, item) => sum + item.weight, 0);
+    const totalWeight = items.reduce((sum, item) => sum + item.weight, 0);
     let currentAccum = 0;
     return items.map(item => {
       const startFrac = currentAccum / (totalWeight || 1);
@@ -235,6 +248,44 @@ export class AudioLipSync {
     if (!this.isPlaying) this._playNext();
   }
 
+  _clearPlaybackDecodeDeadline(deadline = this._playbackDecodeDeadline) {
+    if (!deadline || this._playbackDecodeDeadline !== deadline) return;
+    if (deadline.timeout) {
+      clearTimeout(deadline.timeout);
+    }
+    this._playbackDecodeDeadline = null;
+    this._playbackDecodeTimeout = null;
+    this._rejectPlaybackDecode = null;
+  }
+
+  _cancelPlaybackDecode() {
+    const deadline = this._playbackDecodeDeadline;
+    const reject = deadline?.reject;
+    this._clearPlaybackDecodeDeadline(deadline);
+    reject?.(new Error('Audio playback was cancelled.'));
+  }
+
+  _decodePlaybackAudio(arrayBuffer) {
+    this._clearPlaybackDecodeDeadline();
+    const decodePromise = this.audioContext.decodeAudioData(arrayBuffer);
+    const deadline = { timeout: null, reject: null };
+    return Promise.race([
+      decodePromise,
+      new Promise((_, reject) => {
+        deadline.reject = reject;
+        this._rejectPlaybackDecode = reject;
+        deadline.timeout = setTimeout(() => {
+          this._clearPlaybackDecodeDeadline(deadline);
+          reject(new Error('Audio playback decoding timed out.'));
+        }, PLAYBACK_DECODE_TIMEOUT_MS);
+        this._playbackDecodeDeadline = deadline;
+        this._playbackDecodeTimeout = deadline.timeout;
+      }),
+    ]).finally(() => {
+      this._clearPlaybackDecodeDeadline(deadline);
+    });
+  }
+
   _analyzeFrame() {
     if (!this.analyser) return;
 
@@ -244,7 +295,7 @@ export class AudioLipSync {
 
     // Get current audio time
     const audioTime = this.audioContext ? this.audioContext.currentTime - this._audioStartCtxTime : 0;
-    const progress = this._playbackDuration > 0 
+    const progress = this._playbackDuration > 0
       ? Math.min(Math.max(audioTime / this._playbackDuration, 0), 1)
       : 0;
 
@@ -262,13 +313,14 @@ export class AudioLipSync {
       }
     }
 
-    // Volume from analyser (for intensity modulation)
-    if (this.analyser && this._frequencyData) {
-      this.analyser.getByteFrequencyData(this._frequencyData);
-      let sumAmp = 0;
-      for (let i = 0; i < this._frequencyData.length; i++) sumAmp += this._frequencyData[i];
-      const volume = sumAmp / (this._frequencyData.length * 255);
-      intensity *= Math.min(volume * 3, 1.0);
+    // Waveform RMS measures audible energy. Averaging the whole frequency
+    // spectrum dilutes speech with empty bins and can suppress the mouth.
+    if (this.analyser && this._waveformData) {
+      this.analyser.getFloatTimeDomainData(this._waveformData);
+      let sumSquares = 0;
+      for (const sample of this._waveformData) sumSquares += sample * sample;
+      const volume = Math.sqrt(sumSquares / this._waveformData.length);
+      intensity *= Math.min(volume * 6, 1);
     }
 
     // Update viseme
@@ -284,7 +336,7 @@ export class AudioLipSync {
       targets[VISEMES.sil] = 1.0;
     } else {
       targets[targetViseme] = intensity;
-      
+
       // Coarticulation neighbors
       const neighbors = COARTICULATION[targetViseme];
       if (neighbors) {
@@ -303,7 +355,7 @@ export class AudioLipSync {
       const target = targets[v] || 0;
       const current = this.visemeWeights[v] || 0;
       const baseTau = target > current ? attackTau : releaseTau;
-      
+
       let damper = this.visemeDampers.get(v);
       if (!damper) {
         damper = new SpringDamper(current, baseTau, v);
@@ -311,7 +363,7 @@ export class AudioLipSync {
       } else {
         damper.updateParameters(baseTau, v);
       }
-      
+
       this.visemeWeights[v] = damper.update(target, dt);
     }
 
@@ -351,7 +403,7 @@ export class AudioLipSync {
 
       const arrayBuffer = await blob.arrayBuffer();
       if (generation !== this._playbackGeneration) return;
-      const audioBuffer = await this.audioContext.decodeAudioData(arrayBuffer);
+      const audioBuffer = await this._decodePlaybackAudio(arrayBuffer);
       if (generation !== this._playbackGeneration) return;
 
       const source = this.audioContext.createBufferSource();
@@ -372,8 +424,10 @@ export class AudioLipSync {
 
       source.onended = () => {
         if (this.currentSource !== source) return;
+        try { source.disconnect(); } catch {}
         this.currentSource = null;
-        cancelAnimationFrame(this._animFrame);
+        if (typeof cancelAnimationFrame === 'function') cancelAnimationFrame(this._animFrame);
+        this._animFrame = null;
         this._playNext();
       };
 
@@ -401,6 +455,7 @@ export class AudioLipSync {
     this._fallbackLastClock = 0;
     for (const v of ALL_VISEME_KEYS) {
       this.visemeWeights[v] = v === VISEMES.sil ? 1 : 0;
+      this.visemeDampers.get(v)?.reset(v === VISEMES.sil ? 1 : 0, 0);
     }
   }
 
@@ -409,28 +464,79 @@ export class AudioLipSync {
     this.isPlaying = false;
     this._playbackGeneration++;
     this._speechGeneration++;
+    this._cancelPlaybackDecode();
     this._activeUtterance = null;
+    if (this._speechTimeout) {
+      clearTimeout(this._speechTimeout);
+      this._speechTimeout = null;
+    }
     if (this.currentSource) {
-      try { this.currentSource.stop(); } catch {}
+      const source = this.currentSource;
       this.currentSource = null;
+      try { source.stop(); } catch {}
+      try { source.disconnect(); } catch {}
     }
     if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
       window.speechSynthesis.cancel();
     }
     if (this._fallbackRAF) {
-      cancelAnimationFrame(this._fallbackRAF);
+      if (typeof cancelAnimationFrame === 'function') cancelAnimationFrame(this._fallbackRAF);
       this._fallbackRAF = null;
     }
-    cancelAnimationFrame(this._animFrame);
+    if (typeof cancelAnimationFrame === 'function') cancelAnimationFrame(this._animFrame);
+    this._animFrame = null;
     this._resetVisemes();
+  }
+
+  dispose() {
+    this.stop();
+
+    const context = this.audioContext;
+    const ownsAudioContext = this._ownsAudioContext;
+    try { this.analyser?.disconnect?.(); } catch {}
+    this.audioContext = null;
+    this.analyser = null;
+    this._waveformData = null;
+    this._ownsAudioContext = false;
+
+    if (!ownsAudioContext || !context || context.state === 'closed' || typeof context.close !== 'function') {
+      return Promise.resolve();
+    }
+
+    return context.close().catch((error) => {
+      console.warn('Audio context cleanup failed:', error);
+    });
+  }
+
+  _selectMaleSpeechVoice(speechSynthesis) {
+    let voices;
+    try {
+      voices = speechSynthesis.getVoices?.();
+    } catch {
+      return null;
+    }
+
+    if (!Array.isArray(voices)) return null;
+    return voices.find((voice) => {
+      const lang = typeof voice.lang === 'string' ? voice.lang : '';
+      if (!/^en(?:[-_]|$)/i.test(lang)) return false;
+      if (voice.gender === 'male') return true;
+      if (voice.gender && voice.gender !== 'male') return false;
+      const name = typeof voice.name === 'string' ? voice.name : '';
+      return MALE_VOICE_NAME_PATTERN.test(name);
+    }) || null;
   }
 
   speakTextFallback(text) {
     if (typeof window === 'undefined' || !('speechSynthesis' in window) || typeof SpeechSynthesisUtterance !== 'function') return false;
+    const voice = this._selectMaleSpeechVoice(window.speechSynthesis);
+    if (!voice) return false;
+
     this.isPlaying = true;
     const utterance = new SpeechSynthesisUtterance(text);
     const generation = ++this._speechGeneration;
     this._activeUtterance = utterance;
+    utterance.voice = voice;
     utterance.rate = 1.0;
     utterance.pitch = 1.0;
 
@@ -480,7 +586,7 @@ export class AudioLipSync {
         const target = targets[v] || 0;
         const current = this.visemeWeights[v] || 0;
         const baseTau = target > current ? attackTau : releaseTau;
-        
+
         let damper = this.visemeDampers.get(v);
         if (!damper) {
           damper = new SpringDamper(current, baseTau, v);
@@ -488,7 +594,7 @@ export class AudioLipSync {
         } else {
           damper.updateParameters(baseTau, v);
         }
-        
+
         this.visemeWeights[v] = damper.update(target, dt);
       }
 
@@ -500,8 +606,12 @@ export class AudioLipSync {
     const finish = () => {
       if (this._speechGeneration !== generation || this._activeUtterance !== utterance) return;
       if (this._fallbackRAF) {
-        cancelAnimationFrame(this._fallbackRAF);
+        if (typeof cancelAnimationFrame === 'function') cancelAnimationFrame(this._fallbackRAF);
         this._fallbackRAF = null;
+      }
+      if (this._speechTimeout) {
+        clearTimeout(this._speechTimeout);
+        this._speechTimeout = null;
       }
       this._activeUtterance = null;
       this.isPlaying = false;
@@ -518,11 +628,25 @@ export class AudioLipSync {
 
     try {
       window.speechSynthesis.speak(utterance);
+      if (this._speechGeneration !== generation || this._activeUtterance !== utterance || !this.isPlaying) {
+        return true;
+      }
+      const maxSpeechMs = Math.min(Math.max(totalDurationEstimate * 2000 + 3000, 6000), 60000);
+      this._speechTimeout = setTimeout(() => {
+        if (this._speechGeneration !== generation || this._activeUtterance !== utterance) return;
+        this.onSpeechError?.();
+        try { window.speechSynthesis.cancel(); } catch {}
+        finish();
+      }, maxSpeechMs);
       tick();
       return true;
     } catch {
       this._speechGeneration++;
       this._activeUtterance = null;
+      if (this._speechTimeout) {
+        clearTimeout(this._speechTimeout);
+        this._speechTimeout = null;
+      }
       this.isPlaying = false;
       this._resetVisemes();
       return false;

@@ -11,7 +11,12 @@
     "dev:client": "vite",
     "dev:server": "node server/index.js",
     "start": "node server/index.js",
-    "test": "node --test tests/*.test.js",
+    "test": "node --test --test-timeout=30000 tests/*.test.js",
+    "test:e2e": "node tests/demo.e2e.mjs",
+    "test:avatar": "node tests/lipsync.e2e.mjs",
+    "test:pages": "node tests/pages.e2e.mjs",
+    "test:live": "node scripts/live-smoke.mjs",
+    "verify": "npm test && npm run lint && npm run build",
     "build": "vite build",
     "lint": "oxlint"
   },

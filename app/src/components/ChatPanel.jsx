@@ -5,7 +5,7 @@
 
 import { useRef, useEffect } from 'react';
 
-export function ChatPanel({ messages, streamingText, status }) {
+export function ChatPanel({ messages, streamingText, status, onNewConversation }) {
   const messagesRef = useRef(null);
 
   // Keep the transcript visible without scrolling the page around it.
@@ -15,10 +15,13 @@ export function ChatPanel({ messages, streamingText, status }) {
   }, [messages, streamingText]);
 
   return (
-    <div className="chat-panel" id="chat-panel">
+    <section className="chat-panel" id="chat-panel" aria-label="Conversation">
       <div className="chat-header">
         <h2>Conversation</h2>
-        {status && status !== 'idle' && <span className={`status-badge ${status}`}>{status}</span>}
+        <div className="chat-actions">
+          {status && status !== 'idle' && <span className={`status-badge ${status}`}>{status}</span>}
+          <button type="button" className="new-chat-button" onClick={onNewConversation} aria-label="Start new conversation">New chat</button>
+        </div>
       </div>
 
       <div ref={messagesRef} className="chat-messages" aria-live="polite" aria-relevant="additions text">
@@ -31,7 +34,7 @@ export function ChatPanel({ messages, streamingText, status }) {
         {messages.map((msg, i) => (
           <div key={i} className={`chat-message ${msg.role}${msg.failed ? ' failed' : ''}`}>
             <div className="message-label">
-              {msg.failed ? 'You · request failed' : msg.role === 'user' ? 'You' : 'Assistant'}
+              {msg.cancelled ? 'You · request cancelled' : msg.failed ? 'You · request failed' : msg.role === 'user' ? 'You' : 'Assistant'}
             </div>
             <div className="message-text">{msg.content}</div>
           </div>
@@ -48,6 +51,6 @@ export function ChatPanel({ messages, streamingText, status }) {
         )}
 
       </div>
-    </div>
+    </section>
   );
 }

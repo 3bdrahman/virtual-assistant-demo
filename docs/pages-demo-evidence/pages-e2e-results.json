@@ -1,0 +1,22 @@
+[
+  {
+    "name": "byok setup gates demo and sends visitor key to chat and tts",
+    "status": "passed",
+    "durationMs": 1277
+  },
+  {
+    "name": "invalid visitor key recovers and browser contexts do not share keys",
+    "status": "passed",
+    "durationMs": 2027
+  },
+  {
+    "name": "remove key and new conversation abort pending work without stale resurrection",
+    "status": "passed",
+    "durationMs": 1873
+  },
+  {
+    "name": "demo base path loads avatar assets under demo with webgl",
+    "status": "passed",
+    "durationMs": 4693
+  }
+]

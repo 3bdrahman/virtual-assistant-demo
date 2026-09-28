@@ -1,0 +1,29 @@
+{
+  "date": "2026-09-28",
+  "tests": {
+    "passed": 69,
+    "failed": 0,
+    "skipped": 0
+  },
+  "browserScenarioGroups": 10,
+  "lint": "passed",
+  "build": "passed",
+  "dependencyVulnerabilities": 0,
+  "live": {
+    "startedAt": "2026-09-28T05:46:41.414Z",
+    "health": true,
+    "chat": true,
+    "speech": true,
+    "transcription": true,
+    "replyCharacters": 38,
+    "audioBytes": 192556,
+    "transcriptCharacters": 39
+  },
+  "scope": "Local demo and live NVIDIA provider round trip; deployment and physical audio devices not verified.",
+  "finalOfflinePhoneSmoke": {
+    "passed": true,
+    "emptyTranscriptFullyVisible": true,
+    "noticeOverlap": false,
+    "controlsClipped": false
+  }
+}
