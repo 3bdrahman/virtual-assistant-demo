@@ -1,0 +1,59 @@
+name: Deploy visitor-key demo to Pages
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+      - name: Configure Pages
+        id: pages
+        uses: actions/configure-pages@v5
+      - run: npm ci
+        working-directory: app
+      - name: Verify API relay and visitor-key isolation
+        run: node scripts/check-demo-api.mjs
+        working-directory: app
+        env:
+          DEMO_API_URL: ${{ vars.DEMO_API_URL }}
+          DEMO_ORIGIN: ${{ steps.pages.outputs.origin }}
+      - name: Test and build public frontend
+        run: npm run verify
+        working-directory: app
+        env:
+          BASE_PATH: ${{ steps.pages.outputs.base_path }}/
+          VITE_API_BASE_URL: ${{ vars.DEMO_API_URL }}
+          VITE_REQUIRE_USER_KEY: 'true'
+      - run: npm audit --omit=dev --audit-level=high
+        working-directory: app
+      - uses: actions/upload-pages-artifact@v4
+        with:
+          path: app/dist
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

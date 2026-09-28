@@ -1,0 +1,8 @@
+{
+  "completed": [
+    "http://127.0.0.1:40249/demo/models/64bb1d39ab757f1e75aaa1aa.glb",
+    "http://127.0.0.1:40249/demo/animations/Idle.fbx",
+    "http://127.0.0.1:40249/demo/animations/Standing%20Greeting.fbx"
+  ],
+  "failed": []
+}

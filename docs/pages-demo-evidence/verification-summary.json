@@ -1,0 +1,17 @@
+{
+  "date": "2026-09-28T17:07:47.725Z",
+  "unitTestsPassed": 98,
+  "unitTestsFailed": 0,
+  "pagesScenarioGroupsPassed": 4,
+  "localScenarioGroupsPassed": 10,
+  "avatarRegression": "passed; no idle resets; mouth moves and resets on stop",
+  "voice": "Magpie-Multilingual.EN-US.Jason",
+  "liveProviderRoundTrip": "passed",
+  "lint": "passed",
+  "build": "passed",
+  "clientBundleSecretScan": {
+    "files": 8,
+    "leakedSecretCount": 0
+  },
+  "publicDeployment": "pending API relay host and URL; not published"
+}

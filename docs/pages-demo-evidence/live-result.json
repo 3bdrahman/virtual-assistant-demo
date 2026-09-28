@@ -1,0 +1,10 @@
+{
+  "startedAt": "2026-09-28T16:57:10.015Z",
+  "health": true,
+  "chat": true,
+  "speech": true,
+  "transcription": true,
+  "replyCharacters": 38,
+  "audioBytes": 176172,
+  "transcriptCharacters": 39
+}

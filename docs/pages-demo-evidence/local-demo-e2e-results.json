@@ -1,0 +1,52 @@
+[
+  {
+    "name": "desktop typed demo flow protects history and text",
+    "status": "passed",
+    "durationMs": 1765
+  },
+  {
+    "name": "double submit and incomplete stream are contained",
+    "status": "passed",
+    "durationMs": 891
+  },
+  {
+    "name": "tts fallback and stop speaking leave chat usable",
+    "status": "passed",
+    "durationMs": 815
+  },
+  {
+    "name": "microphone grant deny cancel and empty transcript states",
+    "status": "passed",
+    "durationMs": 4238
+  },
+  {
+    "name": "health missing offline and recovery states are visible",
+    "status": "passed",
+    "durationMs": 6399
+  },
+  {
+    "name": "scene fallbacks preserve usable text controls",
+    "status": "passed",
+    "durationMs": 1186
+  },
+  {
+    "name": "loaded avatar assets render alongside a spoken reply",
+    "status": "passed",
+    "durationMs": 4395
+  },
+  {
+    "name": "keyboard submissions retain valid bounded conversation history",
+    "status": "passed",
+    "durationMs": 1473
+  },
+  {
+    "name": "offline notice and errors keep small-screen controls visible",
+    "status": "passed",
+    "durationMs": 5784
+  },
+  {
+    "name": "responsive layouts and long text wrap without overlap",
+    "status": "passed",
+    "durationMs": 7713
+  }
+]

@@ -12,3 +12,25 @@ test('WebGL detection recognizes a usable context', () => {
   const context = {};
   assert.equal(canUseWebGL({ createElement: () => ({ getContext: () => context }) }), true);
 });
+
+test('WebGL detection tries legacy context and releases probe contexts', () => {
+  const calls = [];
+  let released = false;
+  const context = {
+    getExtension: (name) => {
+      assert.equal(name, 'WEBGL_lose_context');
+      return { loseContext: () => { released = true; } };
+    },
+  };
+
+  assert.equal(canUseWebGL({
+    createElement: () => ({
+      getContext: (type) => {
+        calls.push(type);
+        return type === 'experimental-webgl' ? context : null;
+      },
+    }),
+  }), true);
+  assert.deepEqual(calls, ['webgl2', 'webgl', 'experimental-webgl']);
+  assert.equal(released, true);
+});
