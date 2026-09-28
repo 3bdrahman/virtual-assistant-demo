@@ -1,7 +1,7 @@
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 
-export async function checkDemoApi(apiBase, pagesOrigin, { fetchImpl = fetch, timeoutMs = 30_000, allowLocal = false } = {}) {
+export async function checkDemoApi(apiBase, pagesOrigin, { fetchImpl = fetch, timeoutMs = 30_000, retryDelayMs = 2000, allowLocal = false } = {}) {
   let api;
   let origin;
   try { api = new URL(apiBase); origin = new URL(pagesOrigin); }
@@ -24,7 +24,19 @@ export async function checkDemoApi(apiBase, pagesOrigin, { fetchImpl = fetch, ti
       throw new Error('The relay must allow the exact GitHub Pages origin in ALLOWED_ORIGINS.');
     }
   };
-  const health = await request('/health');
+  // Free hosts may need a minute to wake. Retry only the credential-free
+  // health probe; origin/key validation below still fails immediately.
+  let health;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      health = await request('/health');
+      if (health.status < 500 || attempt === 2) break;
+      await health.body?.cancel();
+    } catch (error) {
+      if (attempt === 2 || !['TimeoutError', 'AbortError', 'TypeError'].includes(error.name)) throw error;
+    }
+    await new Promise((resolve) => setTimeout(resolve, retryDelayMs));
+  }
   if (!health.ok) throw new Error('The demo API health check failed.');
   cors(health);
   const config = await health.json();
