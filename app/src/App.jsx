@@ -283,7 +283,7 @@ function App() {
             <h2>{connection.online ? 'Live conversation is unavailable' : 'Demo is offline'}</h2>
             <p>{connection.online
               ? 'The AI service is not ready right now. Please try again later.'
-              : 'The conversation service could not be reached. Please try again shortly.'}</p>
+              : 'The conversation service could not be reached. On the first visit it may take about a minute to wake. Reconnecting automatically…'}</p>
           </div>
         )}
         <div className="demo-intro">
