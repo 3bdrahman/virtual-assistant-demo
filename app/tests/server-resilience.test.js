@@ -157,6 +157,28 @@ test('stalled NVIDIA STT JSON bodies time out and release the provider slot', as
   assert.equal(cancelled, 1);
 });
 
+test('chat timeout after response headers emits a retryable stream error and frees the slot', async () => {
+  let calls = 0;
+  await withServer({
+    env: { NVIDIA_API_KEY: 'test-only' }, providerTimeoutMs: 25,
+    providerLimits: { maxConcurrent: 1, maxRequests: 20 },
+    fetchImpl: async () => {
+      calls++;
+      return new Response(new ReadableStream({
+        start(controller) { if (calls > 1) { controller.enqueue(new TextEncoder().encode('data: [DONE]\n\n')); controller.close(); } },
+      }), { headers: { 'Content-Type': 'text/event-stream' } });
+    },
+  }, async (origin) => {
+    const request = () => fetch(`${origin}/api/chat`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ messages: [{ role: 'user', content: 'Hello' }] }) });
+    const first = await request();
+    assert.equal(first.status, 200);
+    assert.match(await first.text(), /provider_timeout/);
+    const retry = await request();
+    assert.equal(retry.status, 200);
+    assert.match(await retry.text(), /\[DONE\]/);
+  });
+});
+
 test('slow STT upload bodies are bounded before provider work', async () => {
   let upstreamCalls = 0;
   await withServer({

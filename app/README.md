@@ -15,9 +15,9 @@ npm run dev
 
 Open [http://localhost:5173](http://localhost:5173). The Vite client proxies `/api` to the Express server on port 3011. `.env` is ignored by Git and must stay on the server.
 
-The page rechecks service availability after startup, so it recovers when the API comes online without a reload. A failed or cancelled text request keeps the question in the input for another attempt. Use **Cancel request** while waiting for transcription, chat, or speech, and **Stop speaking** during playback. **New chat** clears the transcript and draft and cancels pending requests and microphone access without restarting the avatar. Cancelled and failed turns are excluded from subsequent AI context. Microphone permission requests can be cancelled from the microphone control.
+The page rechecks service availability after startup, so it recovers when the API comes online without a reload. A failed or cancelled text request keeps the question in the input for another attempt. **Retry** on a failed message resends its text, including a voice transcript, without recording again or losing a different draft. Failure details remain with that message. Use **Cancel request** while waiting for transcription, chat, or speech, and **Stop speaking** during playback. **New chat** clears the transcript and draft and cancels pending requests and microphone access without restarting the avatar. Cancelled and failed turns are excluded from subsequent AI context. Microphone permission requests can be cancelled from the microphone control.
 
-One `NVIDIA_API_KEY` powers chat, Parakeet transcription, and Magpie speech. Provider requests time out after 30 seconds; browser requests have a 45-second deadline that includes response streaming. Microphone capture stops after 60 seconds, and audio decoding and conversion each have a 15-second deadline. Cancelling a request also cancels conversion and upstream work. If the speech service fails, the app tries browser speech only when it can identify an English male voice; otherwise the text reply remains visible. Mouth movement follows a text-timed estimate shaped by audio volume, so it is expressive rather than phoneme-accurate.
+One `NVIDIA_API_KEY` powers chat, Parakeet transcription, and Magpie speech. Chat has a 60-second provider deadline and a 75-second browser deadline to allow for hosted-provider delays; speech endpoints use 30-second provider and 45-second browser deadlines. These include response streaming. Microphone capture stops after 60 seconds, and audio decoding and conversion each have a 15-second deadline. Cancelling a request also cancels conversion and upstream work. If the speech service fails, the app tries browser speech only when it can identify an English male voice; otherwise the text reply remains visible. Mouth movement follows a text-timed estimate shaped by audio volume, so it is expressive rather than phoneme-accurate.
 
 ## Build and serve
 
@@ -87,6 +87,8 @@ For an explicit live release check using the configured server key:
 ```bash
 npm run test:live
 ```
+
+The explicit `npm run test:public` check takes `DEMO_PAGE_URL`, `DEMO_API_URL`, and a visitor `NVIDIA_API_KEY`, plus the Playwright/browser paths used by the other browser tests. It uses real provider quota to verify the deployed frontend, audio playback, GPU mouth movement, microphone flow, and key clearing. It records any provider failure and tries the visible Retry control once; it fails if that retry also fails.
 
 This makes three short real provider calls: chat → synthesized speech → transcription of that speech. It prints pass/fail metadata without credentials, prompts, or audio content. Run it only when you intend to use provider quota. Physical microphone/speaker quality and the deployed HTTPS origin still need checks on the intended demo devices.
 

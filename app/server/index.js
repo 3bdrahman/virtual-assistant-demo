@@ -21,6 +21,7 @@ const MAX_TTS_TEXT_LENGTH = 2_000;
 const MAX_AUDIO_BYTES = 15 * 1024 * 1024;
 const MAX_USER_API_KEY_LENGTH = 4096;
 const DEFAULT_PROVIDER_TIMEOUT_MS = 30_000;
+const DEFAULT_CHAT_TIMEOUT_MS = 60_000;
 const DEFAULT_STT_UPLOAD_TIMEOUT_MS = 45_000;
 const VALID_ROLES = new Set(['system', 'user', 'assistant']);
 const DEFAULT_PROVIDER_LIMITS = {
@@ -132,7 +133,13 @@ function sendProviderFailure(res, logger, route, provider, error, { secrets = []
   if (res.destroyed) return undefined;
   if (error.name === 'AbortError' && res.writableEnded) return undefined;
   logger.error(`[API ${route}] Provider request failed:`, redactSecrets(error.message, secrets));
-  if (res.headersSent) return res.end();
+  if (res.headersSent) {
+    if (String(res.getHeader('Content-Type')).startsWith('text/event-stream')) {
+      const code = error.name === 'TimeoutError' ? 'provider_timeout' : 'provider_unavailable';
+      res.write(`data: ${JSON.stringify({ error: { code } })}\n\n`);
+    }
+    return res.end();
+  }
   if (error.name === 'TimeoutError') {
     return res.status(504).json({ error: `${provider} timed out. Please try again.` });
   }
@@ -596,6 +603,7 @@ export function createApp(options = {}) {
   const logger = options.logger || console;
   const fetchImpl = options.fetchImpl || globalThis.fetch;
   const providerTimeoutMs = options.providerTimeoutMs ?? DEFAULT_PROVIDER_TIMEOUT_MS;
+  const chatTimeoutMs = options.chatTimeoutMs ?? options.providerTimeoutMs ?? DEFAULT_CHAT_TIMEOUT_MS;
   const sttUploadTimeoutMs = options.sttUploadTimeoutMs ?? DEFAULT_STT_UPLOAD_TIMEOUT_MS;
   const maxAudioBytes = options.maxAudioBytes ?? MAX_AUDIO_BYTES;
   const acquireProviderSlot = createProviderGate(options.providerLimits);
@@ -699,7 +707,7 @@ export function createApp(options = {}) {
 
     const releaseProviderSlot = acquireProviderSlot(req, res);
     if (!releaseProviderSlot) return undefined;
-    const providerAbort = createProviderAbort(res, providerTimeoutMs);
+    const providerAbort = createProviderAbort(res, chatTimeoutMs);
 
     try {
       const selectedModel = getChatModel(env);
@@ -870,7 +878,7 @@ function attachGracefulShutdown(server, logger) {
     if (shuttingDown) return;
     shuttingDown = true;
     logger.log(`[SERVER] Received ${signal}; shutting down.`);
-    forceCloseTimer = setTimeout(() => server.closeAllConnections(), DEFAULT_PROVIDER_TIMEOUT_MS + 1000);
+    forceCloseTimer = setTimeout(() => server.closeAllConnections(), DEFAULT_CHAT_TIMEOUT_MS + 1000);
     forceCloseTimer.unref();
     server.close((error) => {
       clearTimeout(forceCloseTimer);

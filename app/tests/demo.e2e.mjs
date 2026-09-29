@@ -405,7 +405,7 @@ async function main() {
         assert.equal(await page.getByRole('textbox', { name: 'Message' }).inputValue(), 'keep this for retry');
 
         provider.reset('success');
-        await page.getByRole('button', { name: 'Send message' }).click();
+        await page.getByRole('button', { name: 'Retry message' }).click();
         await waitForAssistant(page, /keep this for retry/);
         const sentToProvider = provider.snapshot().lastChatBody.messages.map((message) => `${message.role}:${message.content}`);
         assert.ok(sentToProvider.includes('user:Explain black holes simply'), 'successful history should be retained');
@@ -471,6 +471,32 @@ async function main() {
       } finally {
         await context.close();
       }
+    }, artifacts);
+
+    await runScenario(results, 'spoken requests retry without recording again or losing a new draft', async () => {
+      provider.reset('chat-error');
+      const { context, page, diagnostics } = await newPage(browser, origin, {
+        allowConsoleErrors: [/Failed to load resource: the server responded with a status of 503/],
+      });
+      try {
+        await gotoReady(page, origin);
+        await page.getByRole('button', { name: 'Start recording', exact: true }).click();
+        await page.getByRole('button', { name: 'Stop recording', exact: true }).waitFor();
+        await delay(600);
+        await page.getByRole('button', { name: 'Stop recording', exact: true }).click();
+        const failed = page.locator('.chat-message.failed').last();
+        await expectText(failed.locator('.message-text'), 'voice transcript from chromium microphone');
+        await expectText(failed.locator('.message-retry'), /provider error/i);
+        await page.getByRole('textbox', { name: 'Message', exact: true }).fill('Keep this unsent draft');
+        provider.reset('success');
+        await failed.getByRole('button', { name: 'Retry message' }).click();
+        await waitForAssistant(page, /voice transcript from chromium microphone/);
+        assert.equal(await page.getByRole('textbox', { name: 'Message', exact: true }).inputValue(), 'Keep this unsent draft');
+        const snapshot = provider.snapshot();
+        assert.equal(snapshot.calls.some((call) => call.url.includes('/audio/transcriptions')), false, 'retry reuses the transcript');
+        assert.equal(snapshot.lastChatBody.messages.filter((message) => message.role === 'user').length, 1, 'failed turn is excluded from context');
+        await assertNoDiagnostics(diagnostics, 'spoken retry');
+      } finally { await context.close(); }
     }, artifacts);
 
     await runScenario(results, 'microphone grant deny cancel and empty transcript states', async () => {
@@ -633,6 +659,9 @@ async function main() {
       try {
         await gotoReady(offline.page, origin, { expectReady: false });
         await expectText(offline.page.locator('#setup-notice'), 'Demo is offline');
+        const emptyText = await offline.page.locator('.chat-empty p').boundingBox();
+        const chatPanel = await offline.page.locator('#chat-panel').boundingBox();
+        assert.ok(emptyText.y + emptyText.height <= chatPanel.y + chatPanel.height, 'offline phone transcript must remain visible');
         const bounds = await offline.page.locator('.controls').boundingBox();
         if (artifacts) await offline.page.screenshot({ path: path.join(artifacts, 'offline-mobile.png') });
         assert.ok(bounds.y + bounds.height <= VIEWPORTS[0].height + 1, `offline controls clipped: ${JSON.stringify(bounds)}`);

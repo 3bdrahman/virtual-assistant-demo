@@ -15,6 +15,7 @@
     "test:e2e": "node tests/demo.e2e.mjs",
     "test:avatar": "node tests/lipsync.e2e.mjs",
     "test:pages": "node tests/pages.e2e.mjs",
+    "test:public": "node tests/public-demo.e2e.mjs",
     "test:live": "node scripts/live-smoke.mjs",
     "verify": "npm test && npm run lint && npm run build",
     "build": "vite build",
