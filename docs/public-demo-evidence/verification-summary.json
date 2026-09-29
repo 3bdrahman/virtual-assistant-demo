@@ -1,0 +1,28 @@
+{
+  "verifiedAt": "2026-09-29T23:55:25.400Z",
+  "sourceCommit": "5868bbcc57a94d58bf53f5990c6a8e81da38d484",
+  "unitTestsPassed": 102,
+  "lint": "passed",
+  "build": "passed",
+  "newRetryBrowserScenarios": "typed and spoken retries passed; drafts preserved; failed context excluded",
+  "offlineRecovery": "desktop and phone passed after layout correction",
+  "publicBrowser": {
+    "passed": true,
+    "providerRetries": 0,
+    "chat": true,
+    "speech": "Jason",
+    "renderedMouthMovement": true,
+    "stopResetsMouth": true,
+    "microphoneConversation": true,
+    "newChatClears": true,
+    "keyNotPersisted": true,
+    "reloadClearsKey": true,
+    "pageErrors": 0,
+    "consoleErrors": 0
+  },
+  "limits": [
+    "Render free instance may need about a minute to wake after inactivity.",
+    "Physical microphones/speakers and non-Chromium browsers are not established by the synthetic-media browser check.",
+    "Provider availability and user quotas remain external dependencies."
+  ]
+}

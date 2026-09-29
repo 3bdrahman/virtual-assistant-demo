@@ -1,6 +1,8 @@
 # GitHub Pages demo with visitor keys
 
-The public frontend is prepared for GitHub Pages. It talks to a separately hosted Express API. Each visitor supplies a NVIDIA key; it stays in page memory, is sent in an Authorization header to the API relay, and is forwarded to the fixed NVIDIA endpoints. Reloading clears it. Changing or removing it also starts a new conversation.
+The demo is live at **https://3bdrahman.github.io/virtual-assistant-demo/**, with its API at **https://virtual-assistant-pages-api.onrender.com/api**. The deployed conversation flow passed the real-provider browser check on September 29, 2026; see [public verification](public-demo-evidence/public-result.json).
+
+Each visitor supplies a NVIDIA key; it stays in page memory, is sent in an Authorization header to the API relay, and is forwarded to the fixed NVIDIA endpoints. Reloading clears it. Changing or removing it also starts a new conversation. The Render free instance can need about a minute to wake; the page reconnects automatically.
 
 GitHub Pages is [static hosting](https://docs.github.com/en/pages/getting-started-with-github-pages/what-is-github-pages). The NVIDIA endpoints currently do not allow the browser CORS preflight needed for direct calls: the chat OPTIONS response had no Access-Control-Allow-Origin, and both speech OPTIONS requests returned 401. Putting a key in the browser does not remove that restriction. The relay is required for this version of the demo.
 
@@ -26,7 +28,7 @@ The allowed origin excludes the repository path. A custom Pages domain needs its
 
 ## GitHub Pages frontend
 
-The detected repository is `3bdrahman/virtual-assistant-demo`; Pages and the API URL were not configured when checked. Once the HTTPS API host is available:
+The repository `3bdrahman/virtual-assistant-demo` now has Pages enabled and `DEMO_API_URL` set to the deployed relay. For future deployments or another repository:
 
 1. Set the repository Actions variable `DEMO_API_URL` to the complete API base, such as `https://your-api.example/api`. This is a public URL, not a provider key.
 2. Choose **GitHub Actions** as the repository's Pages source.
@@ -56,4 +58,6 @@ PLAYWRIGHT_MODULE=/path/to/playwright/index.mjs npm run test:avatar
 
 The explicit `npm run test:live` command makes real NVIDIA calls. The primary voice is Jason. Browser speech fallback is used only when an available English voice is explicitly labelled male; otherwise the text remains available.
 
-Public deployment remains pending the HTTPS API relay URL and hosting access. The local test environment does not establish the deployed origin's availability, microphone permissions, cold-start behavior, or physical audio quality.
+The public check verified real chat and Jason speech, GPU mouth movement, stop/reset, microphone transcription of a generated speech fixture, a second reply, new-chat clearing, no persisted key, and key removal on reload. All requests succeeded in the final run, with no browser errors or retries. Physical microphone/speaker quality and other browser engines remain device-specific checks.
+
+The release now has 102 passing automated tests. A hosted-provider timeout found during the public check led to a longer bounded chat response window, persistent failure details, and a Retry button that also reuses recorded transcripts. Deployment IDs and final measurements are in [release evidence](public-demo-evidence/verification-summary.json).
