@@ -71,7 +71,7 @@ export async function transcribe(audioBlob, { apiKey, ...options } = {}) {
 }
 
 export async function streamChat(messages, { onToken, apiKey, ...options } = {}) {
-  return withDeadline(options, async (signal) => {
+  return withDeadline({ ...options, timeoutMs: options.timeoutMs ?? 75_000 }, async (signal) => {
     const response = await apiFetch('/chat', {
       method: 'POST', headers: requestHeaders('application/json', apiKey),
       body: JSON.stringify({ messages }), signal,
@@ -98,7 +98,8 @@ export async function streamChat(messages, { onToken, apiKey, ...options } = {})
       let parsed;
       try { parsed = JSON.parse(data); }
       catch { throw new Error('Invalid AI stream data.'); }
-      if (parsed?.error) throw new Error('The AI provider could not finish the reply.');
+      if (parsed?.error?.code === 'provider_timeout') throw new Error('The AI timed out. Please retry your message.');
+      if (parsed?.error) throw new Error('The AI provider could not finish the reply. Please retry your message.');
       const token = parsed?.choices?.[0]?.delta?.content;
       if (token == null) return;
       if (typeof token !== 'string') throw new Error('Invalid AI stream text.');

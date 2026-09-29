@@ -43,6 +43,7 @@ const SYSTEM_PROMPT = {
 
 function App() {
   const [messages, setMessages] = useState([]);
+  const [sentMessage, setSentMessage] = useState(null);
   const messagesRef = useRef([]);
   const [streamingText, setStreamingText] = useState('');
   const [stage, setStage] = useState('idle');
@@ -180,6 +181,7 @@ function App() {
       setMessages(messagesRef.current);
       setStreamingText('');
       replyCommitted = true;
+      setSentMessage(userMessage);
       pendingMessageRef.current = null;
 
       // One playback request per reply keeps browser speech and provider audio in order.
@@ -210,7 +212,7 @@ function App() {
       if (error.status === 401 && requestKey) setKeyPanelOpen(true);
       if (!replyCommitted) {
         messagesRef.current = messagesRef.current.map((message) => (
-          message === userMessage ? { ...message, failed: true } : message
+          message === userMessage ? { ...message, failed: true, error: error.message || 'The request failed. Please retry.' } : message
         ));
         setMessages(messagesRef.current);
       }
@@ -289,7 +291,7 @@ function App() {
         <div className="demo-intro">
           <h1>Conversation, brought to life.</h1>
           <p>Speak or type to a live AI. Watch the avatar respond with voice and expression.</p>
-          {sceneState !== 'ready' && <SceneStatus loading={sceneState === 'loading'} />}
+          {!setupNoticeVisible && sceneState !== 'ready' && <SceneStatus loading={sceneState === 'loading'} />}
           {keyPanelVisible && <ApiKeyPanel hasKey={Boolean(apiKey)} relayOrigin={apiRelayOrigin()} onSave={saveApiKey} onRemove={() => saveApiKey('')} />}
           {!keyPanelVisible && <div className="prompt-list" aria-label="Try a prompt">
             {['Explain black holes simply', 'Tell me a short story', 'Give me a creative idea'].map((prompt) => (
@@ -300,7 +302,7 @@ function App() {
           </div>}
         </div>
         <div className="main-layout">
-          <ChatPanel messages={messages} streamingText={streamingText} status={stage} onNewConversation={newConversation} />
+          <ChatPanel messages={messages} streamingText={streamingText} status={stage} onNewConversation={newConversation} onRetry={processInput} retryDisabled={!ready || isBusy || keyPanelVisible} />
           {['transcribing', 'thinking', 'synthesizing', 'speaking'].includes(stage) && (
             <button className="stop-button" type="button" onClick={cancelRequest}>
               {stage === 'speaking' ? 'Stop speaking' : 'Cancel request'}
@@ -322,7 +324,7 @@ function App() {
               describedBy={controlDescription}
               disabled={!ready || keyPanelVisible || (isBusy && stage !== 'starting' && stage !== 'recording')}
             />
-            <TextInput onSubmit={processInput} describedBy={controlDescription} disabled={!ready || isBusy || keyPanelVisible} />
+            <TextInput onSubmit={processInput} sentMessage={sentMessage} describedBy={controlDescription} disabled={!ready || isBusy || keyPanelVisible} />
           </div>
         </div>
       </div>

@@ -5,7 +5,7 @@
 
 import { useRef, useEffect } from 'react';
 
-export function ChatPanel({ messages, streamingText, status, onNewConversation }) {
+export function ChatPanel({ messages, streamingText, status, onNewConversation, onRetry, retryDisabled }) {
   const messagesRef = useRef(null);
 
   // Keep the transcript visible without scrolling the page around it.
@@ -37,6 +37,10 @@ export function ChatPanel({ messages, streamingText, status, onNewConversation }
               {msg.cancelled ? 'You · request cancelled' : msg.failed ? 'You · request failed' : msg.role === 'user' ? 'You' : 'Assistant'}
             </div>
             <div className="message-text">{msg.content}</div>
+            {msg.failed && <div className="message-retry">
+              {msg.error && <span>{msg.error}</span>}
+              <button type="button" onClick={() => onRetry(msg.content)} disabled={retryDisabled} aria-label="Retry message">Retry</button>
+            </div>}
           </div>
         ))}
 

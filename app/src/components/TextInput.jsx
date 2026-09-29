@@ -2,10 +2,14 @@
  * Text input component — alternative to voice for typing messages.
  */
 
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useEffect } from 'react';
 
-export function TextInput({ onSubmit, describedBy, disabled }) {
+export function TextInput({ onSubmit, sentMessage, describedBy, disabled }) {
   const [text, setText] = useState('');
+
+  useEffect(() => {
+    if (sentMessage) setText((current) => current.trim() === sentMessage.content ? '' : current);
+  }, [sentMessage]);
 
   const handleSubmit = useCallback(async (e) => {
     e.preventDefault();

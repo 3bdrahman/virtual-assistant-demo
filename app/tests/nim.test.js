@@ -260,3 +260,10 @@ test('visitor credentials are sent only in Authorization on provider requests', 
     assert.equal(calls.at(-1).options.headers?.Authorization, undefined);
   } finally { globalThis.fetch = originalFetch; }
 });
+
+test('chat reports the retryable timeout from a stream instead of losing the failure reason', async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => sseResponse(['data: {"error":{"code":"provider_timeout"}}\n\n']);
+  try { await assert.rejects(streamChat([]), /timed out.*retry/i); }
+  finally { globalThis.fetch = originalFetch; }
+});
