@@ -1,0 +1,65 @@
+{
+  "pageUrl": "https://3bdrahman.github.io/virtual-assistant-demo/",
+  "apiBase": "https://virtual-assistant-pages-api.onrender.com/api",
+  "startedAt": "2026-09-29T23:53:35.476Z",
+  "stage": "new chat and key clearing",
+  "visitorKeyRequired": true,
+  "avatarLoaded": true,
+  "chat": true,
+  "speechMode": "Jason · NVIDIA voice",
+  "playback": {
+    "sourcesStarted": 1,
+    "sourcesEnded": 0,
+    "decodedDuration": 8.870020833333333,
+    "analyserFrames": 5,
+    "rmsPeak": 0.07337297819660905,
+    "morphUploads": 860,
+    "mouthPeak": 0.2802642122436957,
+    "lastMouthPeak": 0.2802642122436957,
+    "audioContexts": [
+      {
+        "state": "running",
+        "time": 12.128
+      }
+    ]
+  },
+  "speech": true,
+  "stopResetsMouth": true,
+  "microphoneConversation": true,
+  "newChatClears": true,
+  "keyNotPersisted": true,
+  "reloadClearsKey": true,
+  "passed": true,
+  "responses": [
+    {
+      "route": "/health",
+      "status": 200
+    },
+    {
+      "route": "/chat",
+      "status": 200
+    },
+    {
+      "route": "/tts",
+      "status": 200
+    },
+    {
+      "route": "/stt",
+      "status": 200
+    },
+    {
+      "route": "/chat",
+      "status": 200
+    },
+    {
+      "route": "/tts",
+      "status": 200
+    },
+    {
+      "route": "/health",
+      "status": 200
+    }
+  ],
+  "pageErrors": [],
+  "consoleErrors": []
+}

@@ -4,6 +4,8 @@ Scope: the live NVIDIA-backed application in `app/`, all four API routes, and th
 
 Status: completed for the local demo scope. API, audio, live-provider, browser functional, and visual regression checks passed. Deployment and physical-device limits are listed below.
 
+**Public release follow-up, September 29:** the [live Pages demo](https://3bdrahman.github.io/virtual-assistant-demo/) and Render relay are deployed and verified. The current release has 102 passing automated tests, and its public browser check completed text, speech, microphone, lip movement, and key clearing without errors. See [public evidence](public-demo-evidence/verification-summary.json); the deployment limitations below describe the original local audit.
+
 **Avatar follow-up:** user testing subsequently exposed missing mouth movement and idle restarts that the original checks did not cover. See the [animation repair and corrected verification scope](avatar-animation-fix.md). The earlier avatar checks established rendering and audio playback, not visible lip movement or continuous idle playback.
 
 ## Application graph

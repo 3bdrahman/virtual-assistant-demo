@@ -1,0 +1,22 @@
+{
+  "repository": "3bdrahman/virtual-assistant-demo",
+  "sourceCommit": "5868bbcc57a94d58bf53f5990c6a8e81da38d484",
+  "renderServiceId": "srv-datf7j6gekts73aj7tr0",
+  "renderServiceUrl": "https://virtual-assistant-pages-api.onrender.com",
+  "apiBase": "https://virtual-assistant-pages-api.onrender.com/api",
+  "pagesUrl": "https://3bdrahman.github.io/virtual-assistant-demo/",
+  "plan": "free",
+  "visitorKeysRequired": true,
+  "status": "live-and-verified",
+  "updatedAt": "2026-09-29T23:55:25.398Z",
+  "renderDeploymentId": "dep-dau4uaad0e5s73e92d80",
+  "renderStatus": "live",
+  "relayGate": {
+    "cors": "passed",
+    "visitorKeysRequired": true,
+    "ownerKeyConfigured": false
+  },
+  "pagesRunId": 36647441767,
+  "pagesRunUrl": "https://github.com/3bdrahman/virtual-assistant-demo/actions/runs/36647441767",
+  "pagesStatus": "published"
+}

@@ -1,5 +1,7 @@
 # Virtual Assistant
 
+**[Open the live demo](https://3bdrahman.github.io/virtual-assistant-demo/)** — enter your NVIDIA API key to start. The key is kept in page memory and cleared on reload. The free API host may take about a minute to wake after inactivity.
+
 A live AI conversation with a 3D avatar. Ask a question by text or voice, read the streamed response, and hear the avatar speak. Local use can rely on a server key; the GitHub Pages demo accepts each visitor’s own NVIDIA key in page memory.
 
 ![Virtual Assistant desktop preview](docs/preview.png)
