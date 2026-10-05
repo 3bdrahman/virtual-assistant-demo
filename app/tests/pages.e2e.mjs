@@ -117,6 +117,7 @@ function createFakeProvider() {
       const fields = {};
       for (const [key, value] of init.body?.entries?.() || []) fields[key] = String(value);
       call.form = fields;
+      if (href.endsWith('/synthesize_online')) return new Response(audio.subarray(44));
       return new Response(audio, { status: 200, headers: { 'Content-Type': 'audio/wav' } });
     }
 

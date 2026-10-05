@@ -3,16 +3,50 @@
  * with user messages and assistant responses.
  */
 
-import { useRef, useEffect } from 'react';
+import { useRef, useEffect, useState, useCallback } from 'react';
 
 export function ChatPanel({ messages, streamingText, status, onNewConversation, onRetry, retryDisabled }) {
   const messagesRef = useRef(null);
+  const shouldFollowRef = useRef(true);
+  const previousCountRef = useRef(0);
+  const [showReturnToBottom, setShowReturnToBottom] = useState(false);
 
-  // Keep the transcript visible without scrolling the page around it.
+  const isNearBottom = useCallback((container) => (
+    container.scrollHeight - container.scrollTop - container.clientHeight <= 48
+  ), []);
+
+  const scrollToBottom = useCallback(() => {
+    const container = messagesRef.current;
+    if (!container) return;
+    container.scrollTop = container.scrollHeight;
+    shouldFollowRef.current = true;
+    setShowReturnToBottom(false);
+  }, []);
+
+  const handleScroll = useCallback(() => {
+    const container = messagesRef.current;
+    if (!container) return;
+    const atBottom = isNearBottom(container);
+    shouldFollowRef.current = atBottom;
+    setShowReturnToBottom(!atBottom);
+  }, [isNearBottom]);
+
+  // Follow new content only while the visitor is already reading the latest turn.
   useEffect(() => {
     const container = messagesRef.current;
-    if (container) container.scrollTop = container.scrollHeight;
-  }, [messages, streamingText]);
+    if (!container) return;
+    const previousCount = previousCountRef.current;
+    const latestMessage = messages.at(-1);
+    const newConversation = previousCount > 0 && messages.length === 0;
+    const newOwnMessage = messages.length > previousCount && latestMessage?.role === 'user';
+    previousCountRef.current = messages.length;
+
+    if (shouldFollowRef.current || newOwnMessage || newConversation) {
+      scrollToBottom();
+    } else {
+      setShowReturnToBottom(true);
+    }
+  }, [messages, streamingText, scrollToBottom]);
 
   return (
     <section className="chat-panel" id="chat-panel" aria-label="Conversation">
@@ -24,7 +58,7 @@ export function ChatPanel({ messages, streamingText, status, onNewConversation, 
         </div>
       </div>
 
-      <div ref={messagesRef} className="chat-messages" aria-live="polite" aria-relevant="additions text">
+      <div ref={messagesRef} className="chat-messages" aria-live="polite" aria-relevant="additions text" onScroll={handleScroll}>
         {messages.length === 0 && !streamingText && (
           <div className="chat-empty">
             <p>Ask a question by voice or text.</p>
@@ -55,6 +89,11 @@ export function ChatPanel({ messages, streamingText, status, onNewConversation, 
         )}
 
       </div>
+      {showReturnToBottom && (
+        <button type="button" className="return-bottom-button" onClick={scrollToBottom}>
+          Return to latest message
+        </button>
+      )}
     </section>
   );
 }

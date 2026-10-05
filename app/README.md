@@ -50,12 +50,12 @@ The server listens on the host's `PORT` and `0.0.0.0`; the public URL serves bot
 | --- | --- | --- |
 | Text chat | NVIDIA NIM hosted Chat Completions, streamed SSE | `NVIDIA_API_KEY` |
 | Microphone transcription | NVIDIA hosted Parakeet CTC ASR | `NVIDIA_API_KEY` |
-| Avatar speech | NVIDIA hosted Magpie TTS, WAV playback | `NVIDIA_API_KEY` |
+| Avatar speech | NVIDIA hosted Magpie TTS, streamed PCM playback | `NVIDIA_API_KEY` |
 | Speech fallback | Browser Web Speech API | No extra key |
 
 The selected chat model is controlled by server-side `NVIDIA_CHAT_MODEL`. The server does not accept model selection or credentials from the browser. Browser recordings are converted to mono 16 kHz WAV before the Parakeet request. Text input remains usable if microphone access or transcription is unavailable. No real provider call is made by the automated tests.
 
-NVIDIA hosts [chat](https://docs.api.nvidia.com/nim/reference/llm-apis), [Parakeet ASR](https://build.nvidia.com/nvidia/parakeet-ctc-1_1b-asr/api), and [Magpie TTS](https://build.nvidia.com/nvidia/magpie-tts-multilingual/api) at different endpoints. The server owns those URLs and the API key. Speech requests are limited to 2,000 characters to match [NVIDIA's TTS contract](https://docs.nvidia.com/nim/speech/latest/reference/api-references/tts/http-tts.html); larger replies remain readable and can use browser speech.
+NVIDIA hosts [chat](https://docs.api.nvidia.com/nim/reference/llm-apis), [Parakeet ASR](https://build.nvidia.com/nvidia/parakeet-ctc-1_1b-asr/api), and [Magpie TTS](https://build.nvidia.com/nvidia/magpie-tts-multilingual/api) at different endpoints. The server owns those URLs and the API key. Early phrases start speech before chat completes; the online TTS endpoint returns raw PCM that plays in 100 ms buffers without downloading or decoding a complete WAV. One speech request runs at a time, with at most two phrases queued. The first phrase is capped at 160 characters, later phrases at 600, below [NVIDIA's 2,000-character TTS limit](https://docs.nvidia.com/nim/speech/latest/reference/api-references/tts/http-tts.html). Stop cancels the model stream, speech stream, and scheduled audio. If audio fails after a phrase has started, that phrase is not repeated; its full text remains in the transcript.
 
 ## Quality checks
 
@@ -77,10 +77,11 @@ npm run build
 PLAYWRIGHT_MODULE=/absolute/path/to/playwright/index.mjs npm run test:e2e
 # Check rendered mouth movement and idle animation continuity:
 PLAYWRIGHT_MODULE=/absolute/path/to/playwright/index.mjs npm run test:avatar
+PLAYWRIGHT_MODULE=/absolute/path/to/playwright/index.mjs npm run test:streaming
 PLAYWRIGHT_MODULE=/absolute/path/to/playwright/index.mjs npm run test:pages
 ```
 
-If Playwright is already resolvable from the project, omit `PLAYWRIGHT_MODULE`. Optionally set `CHROMIUM_EXECUTABLE_PATH` for an existing Chromium binary and `E2E_ARTIFACT_DIR` for JSON results and screenshots. The harness starts an isolated local server, uses controlled provider responses, exercises real browser recording and WAV playback, and closes its servers and browser afterward. It never calls NVIDIA or changes the server credential.
+If Playwright is already resolvable from the project, omit `PLAYWRIGHT_MODULE`. Optionally set `CHROMIUM_EXECUTABLE_PATH` for an existing Chromium binary and `E2E_ARTIFACT_DIR` for JSON results and screenshots. The harness starts an isolated local server, uses controlled provider responses, exercises real browser recording and streamed audio playback, and closes its servers and browser afterward. The streaming regression holds both chat and audio responses open and requires playback before either completes. These tests never call NVIDIA or change the server credential.
 
 For an explicit live release check using the configured server key:
 

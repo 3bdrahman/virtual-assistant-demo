@@ -1,0 +1,13 @@
+{
+  "measuredAt": "2026-10-05T03:25:59.525Z",
+  "firstTextMs": 1432,
+  "firstTtsRequestMs": 1435,
+  "firstPcmByteMs": 2208,
+  "firstPlaybackMs": 2217,
+  "firstAudibleSignalMs": 2291,
+  "firstPhraseAudioCompleteMs": 3655,
+  "maxWaveformRms": 0.10911910318008242,
+  "scheduledBuffers": 87,
+  "firstPlaybackBeforeAudioComplete": true,
+  "replyCharacters": 166
+}

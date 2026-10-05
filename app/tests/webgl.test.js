@@ -13,7 +13,7 @@ test('WebGL detection recognizes a usable context', () => {
   assert.equal(canUseWebGL({ createElement: () => ({ getContext: () => context }) }), true);
 });
 
-test('WebGL detection tries legacy context and releases probe contexts', () => {
+test('WebGL detection releases its WebGL 2 probe context', () => {
   const calls = [];
   let released = false;
   const context = {
@@ -27,10 +27,14 @@ test('WebGL detection tries legacy context and releases probe contexts', () => {
     createElement: () => ({
       getContext: (type) => {
         calls.push(type);
-        return type === 'experimental-webgl' ? context : null;
+        return type === 'webgl2' ? context : null;
       },
     }),
   }), true);
-  assert.deepEqual(calls, ['webgl2', 'webgl', 'experimental-webgl']);
+  assert.deepEqual(calls, ['webgl2']);
   assert.equal(released, true);
+});
+
+test('WebGL 1-only browsers get text controls instead of a renderer initialization failure', () => {
+  assert.equal(canUseWebGL({ createElement: () => ({ getContext: (type) => type === 'webgl2' ? null : {} }) }), false);
 });

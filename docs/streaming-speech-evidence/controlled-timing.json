@@ -1,0 +1,8 @@
+{
+  "scenario": "Chat and first TTS response remain held open until after first playback",
+  "submitToFirstPlaybackMs": 538,
+  "bufferedScheduleGapSeconds": 0,
+  "cancellationAbortsUnfinishedChatAndTts": true,
+  "cancelledAudioCannotRestartOnNewConversation": true,
+  "provider": "deterministic local fixture"
+}

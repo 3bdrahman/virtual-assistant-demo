@@ -159,9 +159,66 @@ export async function synthesize(text, { apiKey, ...options } = {}) {
   });
 }
 
-export async function checkHealth(timeoutMs = 5000) {
+// The relay's streaming contract is mono, signed little-endian PCM16 at 44.1 kHz.
+// Emit 100 ms buffers without waiting for a complete file or decodeAudioData.
+export async function streamSynthesize(text, { onChunk, apiKey, ...options } = {}) {
+  return withDeadline(options, async (signal) => {
+    const response = await apiFetch('/tts', {
+      method: 'POST', headers: requestHeaders('application/json', apiKey),
+      body: JSON.stringify({ text, stream: true }), signal,
+    });
+    const type = response.headers.get('content-type')?.toLowerCase().replace(/\s/g, '');
+    if (type !== 'audio/pcm;rate=44100;channels=1' || !response.body) {
+      await response.body?.cancel();
+      throw new Error('Speech server returned invalid streaming audio.');
+    }
+    const reader = response.body.getReader();
+    const cancel = () => { reader.cancel().catch(() => {}); };
+    signal.addEventListener('abort', cancel, { once: true });
+    let samples = new Float32Array(4410);
+    let offset = 0;
+    let lowByte = null;
+    let sampleCount = 0;
+    let bytesRead = 0;
+    try {
+      while (true) {
+        signal.throwIfAborted();
+        const { done, value } = await reader.read();
+        signal.throwIfAborted();
+        if (done) break;
+        bytesRead += value.length;
+        if (bytesRead > 15 * 1024 * 1024) throw new Error('Speech audio was too large.');
+        for (const byte of value) {
+          if (lowByte === null) {
+            lowByte = byte;
+          } else {
+            const signed = (lowByte | (byte << 8)) << 16 >> 16;
+            samples[offset++] = signed / 32768;
+            sampleCount++;
+            lowByte = null;
+            if (offset === samples.length) {
+              onChunk(samples);
+              samples = new Float32Array(4410);
+              offset = 0;
+            }
+          }
+        }
+      }
+      if (lowByte !== null) throw new Error('Speech audio was truncated.');
+      if (!sampleCount) throw new Error('Speech server returned empty audio.');
+      if (offset) onChunk(samples.slice(0, offset));
+      return { sampleRate: 44100, sampleCount };
+    } finally {
+      signal.removeEventListener('abort', cancel);
+      cancel();
+      reader.releaseLock();
+    }
+  });
+}
+
+export async function checkHealth(timeoutMs = 5000, { signal } = {}) {
   try {
-    return await withDeadline({ timeoutMs }, async (signal) => {
+    return await withDeadline({ timeoutMs, signal }, async (signal) => {
       const response = await apiFetch('/health', { signal, cache: 'no-store' });
       const data = await response.json();
       return { ok: data?.ok === true, hasNvidiaKey: data?.hasNvidiaKey === true, ...(data?.requiresUserKey === true ? { requiresUserKey: true } : {}) };

@@ -1,0 +1,29 @@
+{
+  "idleBefore": {
+    "count": 40,
+    "resets": 0,
+    "elapsed": 3911.60000000149,
+    "progress": 3.9010000000000007,
+    "actionCounts": [
+      2
+    ]
+  },
+  "idleDuring": {
+    "count": 12,
+    "resets": 0,
+    "elapsed": 1504,
+    "progress": 1.5058999999985083,
+    "actionCounts": [
+      2
+    ]
+  },
+  "mouthMotion": {
+    "maxFromBaseline": 0.9014624784284937,
+    "maxBetweenSamples": 0.8214315233317545,
+    "maxSum": 1.6813753034675971,
+    "movingSamples": 16,
+    "count": 112
+  },
+  "stopResetsMouth": true,
+  "secondReplyMovesMouth": true
+}

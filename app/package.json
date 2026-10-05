@@ -14,6 +14,7 @@
     "test": "node --test --test-timeout=30000 tests/*.test.js",
     "test:e2e": "node tests/demo.e2e.mjs",
     "test:avatar": "node tests/lipsync.e2e.mjs",
+    "test:streaming": "node tests/streaming-speech.e2e.mjs",
     "test:pages": "node tests/pages.e2e.mjs",
     "test:public": "node tests/public-demo.e2e.mjs",
     "test:live": "node scripts/live-smoke.mjs",

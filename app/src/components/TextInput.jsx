@@ -2,21 +2,23 @@
  * Text input component — alternative to voice for typing messages.
  */
 
-import { useState, useCallback, useEffect } from 'react';
+import { useState, useCallback, useEffect, useRef } from 'react';
 
 export function TextInput({ onSubmit, sentMessage, describedBy, disabled }) {
   const [text, setText] = useState('');
+  const composingRef = useRef(false);
 
+  // The parent commit is the only clear signal; late submit promises must not
+  // erase a newer draft that happens to match the previous message text.
   useEffect(() => {
     if (sentMessage) setText((current) => current.trim() === sentMessage.content ? '' : current);
   }, [sentMessage]);
 
   const handleSubmit = useCallback(async (e) => {
     e.preventDefault();
-    if (!text.trim() || disabled) return;
+    if (!text.trim() || disabled || composingRef.current) return;
     const submitted = text.trim();
-    const succeeded = await onSubmit(submitted);
-    if (succeeded) setText((current) => current.trim() === submitted ? '' : current);
+    await onSubmit(submitted);
   }, [text, disabled, onSubmit]);
 
   return (
@@ -29,8 +31,10 @@ export function TextInput({ onSubmit, sentMessage, describedBy, disabled }) {
         placeholder="Type a message..."
         value={text}
         onChange={(e) => setText(e.target.value)}
+        onCompositionStart={() => { composingRef.current = true; }}
+        onCompositionEnd={() => { composingRef.current = false; }}
         onKeyDown={(event) => {
-          if (event.key === 'Enter' && (event.nativeEvent.isComposing || event.keyCode === 229)) event.preventDefault();
+          if (event.key === 'Enter' && (composingRef.current || event.nativeEvent.isComposing || event.keyCode === 229)) event.preventDefault();
         }}
         disabled={disabled}
         aria-describedby={describedBy}

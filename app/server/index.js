@@ -10,6 +10,7 @@ export const DEFAULT_PORT = 3011;
 const NIM_BASE = 'https://integrate.api.nvidia.com/v1';
 const NVIDIA_STT_URL = 'https://1598d209-5e27-4d3c-8079-4751568b1081.invocation.api.nvcf.nvidia.com/v1/audio/transcriptions';
 const NVIDIA_TTS_URL = 'https://877104f7-e885-42b9-8de8-f6e4c6303969.invocation.api.nvcf.nvidia.com/v1/audio/synthesize';
+const NVIDIA_TTS_STREAMING_URL = 'https://877104f7-e885-42b9-8de8-f6e4c6303969.invocation.api.nvcf.nvidia.com/v1/audio/synthesize_online';
 const DEFAULT_CHAT_MODEL = 'nvidia/nemotron-3.5-lightning-30b-a3b';
 const NVIDIA_TTS_VOICE = 'Magpie-Multilingual.EN-US.Jason';
 const MAX_JSON_BYTES = '1mb';
@@ -227,7 +228,15 @@ function validateTtsPayload(body) {
   if (body.voice !== undefined) {
     return 'voice is selected by the server.';
   }
+  if (body.stream !== undefined && typeof body.stream !== 'boolean') {
+    return 'stream must be a boolean when provided.';
+  }
   return null;
+}
+
+function isStreamingPcmContentType(contentType) {
+  const type = contentType.split(';', 1)[0].trim().toLowerCase();
+  return type === '' || type === 'application/octet-stream' || type === 'audio/pcm';
 }
 
 function allowedOrigins(env, host) {
@@ -785,7 +794,8 @@ export function createApp(options = {}) {
       formData.append('encoding', 'LINEAR_PCM');
       formData.append('sample_rate_hz', '44100');
 
-      const ttsRes = await fetchImpl(NVIDIA_TTS_URL, {
+      const streamingAudio = req.body.stream === true;
+      const ttsRes = await fetchImpl(streamingAudio ? NVIDIA_TTS_STREAMING_URL : NVIDIA_TTS_URL, {
         method: 'POST',
         headers: { Authorization: `Bearer ${apiKey}` },
         body: formData,
@@ -798,7 +808,10 @@ export function createApp(options = {}) {
       }
 
       const contentType = ttsRes.headers.get('content-type') || '';
-      if (!contentType.toLowerCase().includes('audio/wav')) {
+      const validContentType = streamingAudio
+        ? isStreamingPcmContentType(contentType)
+        : contentType.toLowerCase().includes('audio/wav');
+      if (!validContentType) {
         await cancelProviderBody(ttsRes.body);
         return res.status(502).json({ error: 'NVIDIA TTS returned an unexpected response format.' });
       }
@@ -806,7 +819,13 @@ export function createApp(options = {}) {
       const bytesWritten = await writeUpstreamBody(ttsRes.body, res, {
         signal: providerAbort.signal,
         beforeFirstWrite: () => {
-          res.setHeader('Content-Type', 'audio/wav');
+          if (streamingAudio) {
+            res.setHeader('Content-Type', 'audio/pcm;rate=44100;channels=1');
+            res.setHeader('Cache-Control', 'no-store,no-transform');
+            res.setHeader('X-Accel-Buffering', 'no');
+          } else {
+            res.setHeader('Content-Type', 'audio/wav');
+          }
         },
       });
       if (bytesWritten === 0 && !res.headersSent) {

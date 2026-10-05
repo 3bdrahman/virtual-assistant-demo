@@ -139,6 +139,7 @@ const SMOOTH_ATTACK_TAU  = 0.045;
 const SMOOTH_RELEASE_TAU = 0.110;
 const SMOOTH_SIL_TAU     = 0.150;
 const PLAYBACK_DECODE_TIMEOUT_MS = 15_000;
+const MAX_DECODE_AHEAD = 2;
 const MALE_VOICE_NAME_PATTERN = /\bmale\b/i;
 
 import { SpringDamper } from '../utils/springDamper.js';
@@ -158,8 +159,10 @@ export class AudioLipSync {
     this.visemeWeights[VISEMES.sil] = 1;
 
     this.onIdle = null;
+    this.onPlaybackStart = null;
     this.onPlaybackError = null;
     this.onSpeechError = null;
+    this.onQueueChange = null;
     this._animFrame = null;
     this._waveformData = null;
     this._ownsAudioContext = false;
@@ -183,8 +186,17 @@ export class AudioLipSync {
     this._speechTimeout = null;
     this._playbackDecodeTimeout = null;
     this._rejectPlaybackDecode = null;
-    this._playbackDecodeDeadline = null;
+    this._queuePumpPromise = null;
+    this._nextQueueId = 1;
+    this._activeAudioItem = null;
+    this._scheduleCursor = 0;
+    this._dispatchingPlaybackError = false;
+    this._resumePromise = null;
 
+  }
+
+  get pendingCount() {
+    return this.queue.length;
   }
 
   init() {
@@ -244,46 +256,124 @@ export class AudioLipSync {
 
   enqueue(audioBlob, sentenceText = '') {
     this.init();
-    this.queue.push({ blob: audioBlob, text: sentenceText });
-    if (!this.isPlaying) this._playNext();
+    this.queue.push(this._createQueueItem('audio', { blob: audioBlob, text: sentenceText }));
+    this._notifyQueueChange();
+    this._requestQueuePump();
   }
 
-  _clearPlaybackDecodeDeadline(deadline = this._playbackDecodeDeadline) {
-    if (!deadline || this._playbackDecodeDeadline !== deadline) return;
-    if (deadline.timeout) {
-      clearTimeout(deadline.timeout);
-    }
-    this._playbackDecodeDeadline = null;
-    this._playbackDecodeTimeout = null;
-    this._rejectPlaybackDecode = null;
+  enqueueText(text) {
+    return this._enqueueTextItem(text, false);
   }
 
-  _cancelPlaybackDecode() {
-    const deadline = this._playbackDecodeDeadline;
-    const reject = deadline?.reject;
-    this._clearPlaybackDecodeDeadline(deadline);
-    reject?.(new Error('Audio playback was cancelled.'));
+  beginPcm(text = '', { speechId = null, sampleRate = 44100 } = {}) {
+    this.init();
+    const item = this._createQueueItem('pcm', { text });
+    item.speechId = speechId || `pcm-${item.id}`;
+    item.sampleRate = sampleRate;
+    item.chunks = [];
+    item.final = false;
+    item.scheduledDuration = 0;
+    item.receivedDuration = 0;
+    item.estimatedDuration = Math.max(text.length * 0.065, 0.5);
+    item.progress = 0;
+    item.startTime = null;
+    item.endedDuration = 0;
+    item.started = false;
+    item.audible = false;
+    this.queue.push(item);
+    this._notifyQueueChange();
+    this._requestQueuePump();
+    return item.speechId;
   }
 
-  _decodePlaybackAudio(arrayBuffer) {
-    this._clearPlaybackDecodeDeadline();
-    const decodePromise = this.audioContext.decodeAudioData(arrayBuffer);
-    const deadline = { timeout: null, reject: null };
-    return Promise.race([
-      decodePromise,
-      new Promise((_, reject) => {
-        deadline.reject = reject;
-        this._rejectPlaybackDecode = reject;
-        deadline.timeout = setTimeout(() => {
-          this._clearPlaybackDecodeDeadline(deadline);
-          reject(new Error('Audio playback decoding timed out.'));
-        }, PLAYBACK_DECODE_TIMEOUT_MS);
-        this._playbackDecodeDeadline = deadline;
-        this._playbackDecodeTimeout = deadline.timeout;
-      }),
-    ]).finally(() => {
-      this._clearPlaybackDecodeDeadline(deadline);
+  enqueuePcm(samples, text = '', { speechId = null, sampleRate = 44100, final = false } = {}) {
+    const id = speechId || this.beginPcm(text, { sampleRate });
+    const group = this.queue.find((candidate) => candidate.kind === 'pcm' && candidate.speechId === id);
+    // Late chunks must not recreate a cancelled or failed phrase.
+    if (!group || group.final) return false;
+    if (text && !group.text) group.text = text;
+
+    const buffer = this._createPcmAudioBuffer(samples, group.sampleRate);
+    group.chunks.push({
+      buffer,
+      duration: buffer.duration,
+      offset: group.receivedDuration,
+      source: null,
+      startTime: 0,
+      startTimer: null,
+      ended: false,
+      scheduled: false,
     });
+    group.receivedDuration += buffer.duration;
+    if (final) group.final = true;
+    this._requestQueuePump();
+    return group.speechId;
+  }
+
+  finishPcm(speechId) {
+    const item = this.queue.find((candidate) => candidate.kind === 'pcm' && candidate.speechId === speechId);
+    if (!item) return false;
+    item.final = true;
+    if (item.chunks.every((chunk) => chunk.ended)) {
+      if (this._activeAudioItem === item) this._activeAudioItem = null;
+      if (this.currentSource && item.chunks.some((chunk) => chunk.source === this.currentSource)) {
+        this.currentSource = null;
+      }
+      this._removeQueueItem(item);
+      this._requestQueuePump();
+      this._settleIdleIfEmpty();
+      return true;
+    }
+    this._requestQueuePump();
+    return true;
+  }
+
+  _createPcmAudioBuffer(samples, sampleRate) {
+    const audioBuffer = this.audioContext.createBuffer(1, samples.length, sampleRate);
+    audioBuffer.getChannelData(0).set(samples);
+    return audioBuffer;
+  }
+
+  _createQueueItem(kind, { blob = null, text = '', voice = null } = {}) {
+    return {
+      id: this._nextQueueId++,
+      kind,
+      blob,
+      text: text || '',
+      voice,
+      state: 'queued',
+      audioBuffer: null,
+      source: null,
+      startTime: 0,
+      duration: 0,
+      startTimer: null,
+      decodeTimeout: null,
+      decodeReject: null,
+      generation: this._playbackGeneration,
+      playbackStarted: false,
+    };
+  }
+
+  _notifyQueueChange() {
+    this.onQueueChange?.(this.pendingCount);
+  }
+
+  _requestQueuePump() {
+    if (this._queuePumpPromise) return;
+    const generation = this._playbackGeneration;
+    this._queuePumpPromise = Promise.resolve().then(() => {
+      this._queuePumpPromise = null;
+      if (generation !== this._playbackGeneration) return;
+      this._pumpQueue();
+    });
+  }
+
+  _removeQueueItem(item) {
+    const index = this.queue.indexOf(item);
+    if (index === -1) return false;
+    this.queue.splice(index, 1);
+    this._notifyQueueChange();
+    return true;
   }
 
   _analyzeFrame() {
@@ -295,7 +385,7 @@ export class AudioLipSync {
 
     // Get current audio time
     const audioTime = this.audioContext ? this.audioContext.currentTime - this._audioStartCtxTime : 0;
-    const progress = this._playbackDuration > 0
+    const progress = this._activeAudioItem?.kind === 'pcm' ? this._pcmProgress(this._activeAudioItem) : this._playbackDuration > 0
       ? Math.min(Math.max(audioTime / this._playbackDuration, 0), 1)
       : 0;
 
@@ -369,81 +459,361 @@ export class AudioLipSync {
 
   }
 
-  async _playNext() {
+  _pumpQueue() {
     if (this.queue.length === 0) {
-      this.isPlaying = false;
-      this.currentSource = null;
-      this._resetVisemes();
-      this.onIdle?.();
+      this._settleIdleIfEmpty();
       return;
     }
 
     this.isPlaying = true;
-    const generation = this._playbackGeneration;
-    const item = this.queue.shift();
-    const blob = item.blob;
-    const text = item.text || '';
-    this._textTimeline = this._buildTextTimeline(text);
-
-    try {
-      if (this.audioContext.state === 'suspended') {
-        let timer;
-        try {
-          await Promise.race([
-            this.audioContext.resume(),
-            new Promise((_, reject) => {
-              timer = setTimeout(() => reject(new Error('Audio output did not start.')), 3000);
-            }),
-          ]);
-        } finally {
-          clearTimeout(timer);
-        }
+    if (this.audioContext?.state === 'suspended' && this.queue.some((item) => item.kind === 'pcm' && item.chunks.length)) {
+      if (!this._resumePromise) {
+        const generation = this._playbackGeneration;
+        const pending = this._ensureAudioOutputReady(generation).then(() => {
+          if (this.audioContext?.state === 'suspended') throw new Error('Audio output did not start.');
+        }).catch((error) => {
+          if (generation !== this._playbackGeneration) return;
+          for (const item of [...this.queue]) {
+            if (item.kind === 'pcm') this._handlePlaybackItemError(item, error);
+          }
+        }).finally(() => {
+          if (this._resumePromise !== pending) return;
+          this._resumePromise = null;
+          this._requestQueuePump();
+        });
+        this._resumePromise = pending;
       }
-      if (generation !== this._playbackGeneration) return;
+      return;
+    }
+    this._startQueuedDecodes();
+    this._scheduleReadyAudio();
+    this._scheduleReadyPcm();
+    this._startQueuedTextIfReady();
+  }
 
-      const arrayBuffer = await blob.arrayBuffer();
-      if (generation !== this._playbackGeneration) return;
-      const audioBuffer = await this._decodePlaybackAudio(arrayBuffer);
-      if (generation !== this._playbackGeneration) return;
+  _startQueuedDecodes() {
+    let activeDecodeWindow = 0;
+    for (const item of this.queue) {
+      if (item.kind !== 'audio') continue;
+      if (item.state === 'decoding' || item.state === 'ready' || item.state === 'scheduled' || item.state === 'playing') {
+        activeDecodeWindow++;
+      }
+    }
+
+    for (const item of this.queue) {
+      if (activeDecodeWindow >= MAX_DECODE_AHEAD) return;
+      if (item.kind !== 'audio' || item.state !== 'queued') continue;
+      item.state = 'decoding';
+      item.generation = this._playbackGeneration;
+      activeDecodeWindow++;
+      this._decodeQueuedAudio(item);
+    }
+  }
+
+  async _ensureAudioOutputReady(generation) {
+    if (this.audioContext?.state !== 'suspended') return;
+    let timer;
+    try {
+      await Promise.race([
+        this.audioContext.resume(),
+        new Promise((_, reject) => {
+          timer = setTimeout(() => reject(new Error('Audio output did not start.')), 3000);
+        }),
+      ]);
+    } finally {
+      clearTimeout(timer);
+    }
+    if (generation !== this._playbackGeneration) throw new Error('Audio playback was cancelled.');
+  }
+
+  _decodeAudioBufferForItem(arrayBuffer, item) {
+    const decodePromise = this.audioContext.decodeAudioData(arrayBuffer);
+    let timeoutId = null;
+    const deadline = new Promise((_, reject) => {
+      item.decodeReject = reject;
+      timeoutId = setTimeout(() => {
+        item.decodeTimeout = null;
+        item.decodeReject = null;
+        reject(new Error('Audio playback decoding timed out.'));
+      }, PLAYBACK_DECODE_TIMEOUT_MS);
+      item.decodeTimeout = timeoutId;
+      this._rejectPlaybackDecode = reject;
+      this._playbackDecodeTimeout = timeoutId;
+    });
+
+    return Promise.race([decodePromise, deadline]).finally(() => {
+      if (timeoutId) clearTimeout(timeoutId);
+      if (this._playbackDecodeTimeout === timeoutId) {
+        this._playbackDecodeTimeout = null;
+        this._rejectPlaybackDecode = null;
+      }
+      item.decodeTimeout = null;
+      item.decodeReject = null;
+    });
+  }
+
+  async _decodeQueuedAudio(item) {
+    const generation = item.generation;
+    try {
+      await this._ensureAudioOutputReady(generation);
+      if (generation !== this._playbackGeneration || !this.queue.includes(item)) return;
+
+      const arrayBuffer = await item.blob.arrayBuffer();
+      if (generation !== this._playbackGeneration || !this.queue.includes(item)) return;
+
+      const audioBuffer = await this._decodeAudioBufferForItem(arrayBuffer, item);
+      if (generation !== this._playbackGeneration || !this.queue.includes(item)) return;
+
+      item.audioBuffer = audioBuffer;
+      item.duration = audioBuffer.duration || 1;
+      item.state = 'ready';
+      this._requestQueuePump();
+    } catch (err) {
+      if (generation !== this._playbackGeneration || !this.queue.includes(item)) return;
+      this._handlePlaybackItemError(item, err);
+    }
+  }
+
+  _scheduleReadyAudio() {
+    if (!this.audioContext || !this.analyser) return;
+
+    let cursor = this._scheduleCursor || 0;
+    for (const item of this.queue) {
+      if (item.kind === 'text' || item.kind === 'pcm') break;
+      if (item.kind !== 'audio') continue;
+      if (item.state === 'queued' || item.state === 'decoding') break;
+      if (item.state === 'scheduled' || item.state === 'playing') {
+        cursor = Math.max(cursor, item.startTime + item.duration);
+        continue;
+      }
+      if (item.state !== 'ready') break;
 
       const source = this.audioContext.createBufferSource();
-      source.buffer = audioBuffer;
+      source.buffer = item.audioBuffer;
       source.connect(this.analyser);
       this.analyser.connect(this.audioContext.destination);
-      this.currentSource = source;
+      item.source = source;
+      item.state = 'scheduled';
 
-      this._playbackDuration = audioBuffer.duration || 1;
-      this._lastFrameClock = 0;
+      const startTime = Math.max(this.audioContext.currentTime, cursor || this.audioContext.currentTime);
+      item.startTime = startTime;
+      cursor = startTime + item.duration;
+      this._scheduleCursor = cursor;
 
-      const analyze = () => {
-        this._analyzeFrame();
-        if (this.isPlaying) {
-          this._animFrame = requestAnimationFrame(analyze);
-        }
-      };
+      source.onended = () => this._finishAudioItem(item, source);
+      source.start(startTime);
 
-      source.onended = () => {
-        if (this.currentSource !== source) return;
-        try { source.disconnect(); } catch {}
-        this.currentSource = null;
-        if (typeof cancelAnimationFrame === 'function') cancelAnimationFrame(this._animFrame);
-        this._animFrame = null;
-        this._playNext();
-      };
-
-      source.start(0);
-      const ctx = this.audioContext;
-      const baseLatency = Number.isFinite(ctx.baseLatency) ? ctx.baseLatency : 0;
-      const outputLatency = (ctx.outputLatency && Number.isFinite(ctx.outputLatency)) ? ctx.outputLatency : 0;
-      this._audioStartCtxTime = ctx.currentTime + baseLatency + outputLatency;
-      analyze();
-    } catch (err) {
-      if (generation !== this._playbackGeneration) return;
-      console.error('Audio playback error:', err);
-      this.isPlaying = false;
-      this.onPlaybackError?.(err, text);
-      if (!this.isPlaying) this._playNext();
+      if (this.queue[0] === item) {
+        this._markAudioItemStarted(item);
+      } else {
+        const delayMs = Math.max((startTime - this.audioContext.currentTime) * 1000, 0);
+        item.startTimer = setTimeout(() => {
+          item.startTimer = null;
+          if (this.queue[0] === item) this._markAudioItemStarted(item);
+        }, delayMs);
+      }
     }
+  }
+
+  _scheduleReadyPcm() {
+    if (!this.audioContext || !this.analyser) return;
+    for (const item of this.queue) {
+      if (item.kind !== 'pcm') break;
+      for (const chunk of item.chunks) {
+        if (chunk.scheduled) continue;
+        const source = this.audioContext.createBufferSource();
+        source.buffer = chunk.buffer;
+        source.connect(this.analyser);
+        this.analyser.connect(this.audioContext.destination);
+
+        const startTime = Math.max(this.audioContext.currentTime, this._scheduleCursor || this.audioContext.currentTime);
+        chunk.source = source;
+        chunk.startTime = startTime;
+        chunk.scheduled = true;
+        item.scheduledDuration += chunk.duration;
+        this._scheduleCursor = startTime + chunk.duration;
+        if (item.startTime === null) item.startTime = startTime;
+        item.duration = item.scheduledDuration;
+
+        source.onended = () => this._finishPcmChunk(item, chunk, source);
+        source.start(startTime);
+
+        if (!item.audible && this.queue[0] === item) {
+          this._markPcmGroupStarted(item, chunk);
+        } else {
+          const delayMs = Math.max((startTime - this.audioContext.currentTime) * 1000, 0);
+          chunk.startTimer = setTimeout(() => {
+            chunk.startTimer = null;
+            if (!this.queue.includes(item)) return;
+            if (!item.audible) this._markPcmGroupStarted(item, chunk);
+            else if (this._activeAudioItem === item) this.currentSource = source;
+          }, delayMs);
+        }
+      }
+      // Until EOF this phrase may still receive more audio. Its successor
+      // cannot claim an audio-clock position yet.
+      if (!item.final) break;
+    }
+  }
+
+  _pcmProgress(item) {
+    const ctx = this.audioContext;
+    const audibleTime = ctx.currentTime - (ctx.baseLatency || 0) - (ctx.outputLatency || 0);
+    let elapsed = item.endedDuration;
+    for (const chunk of item.chunks) {
+      if (chunk.scheduled && audibleTime >= chunk.startTime) {
+        elapsed = Math.max(elapsed, chunk.offset + Math.min(audibleTime - chunk.startTime, chunk.duration));
+      }
+    }
+    this._playbackDuration = item.final ? item.receivedDuration : Math.max(item.estimatedDuration, elapsed + 0.3);
+    // Sample offsets exclude network stalls. Never rewind when the final
+    // duration replaces the estimate or more audio arrives.
+    item.progress = Math.min(Math.max(item.progress, elapsed / Math.max(this._playbackDuration, 0.1)), item.final ? 1 : 0.97);
+    return item.progress;
+  }
+
+  _markPcmGroupStarted(item, chunk) {
+    if (!this.queue.includes(item) || item.kind !== 'pcm') return;
+    item.started = true;
+    item.audible = true;
+    item.state = 'playing';
+    this._activeAudioItem = item;
+    this.currentSource = chunk.source;
+    this._textTimeline = this._buildTextTimeline(item.text);
+    this._playbackDuration = item.final ? item.receivedDuration : item.estimatedDuration;
+    this._lastFrameClock = 0;
+
+    const ctx = this.audioContext;
+    const baseLatency = Number.isFinite(ctx.baseLatency) ? ctx.baseLatency : 0;
+    const outputLatency = (ctx.outputLatency && Number.isFinite(ctx.outputLatency)) ? ctx.outputLatency : 0;
+    this._audioStartCtxTime = item.startTime + baseLatency + outputLatency;
+
+    this.onPlaybackStart?.(item.text);
+    this._ensureAudioAnalysisLoop();
+  }
+
+  _finishPcmChunk(item, chunk, source) {
+    if (!this.queue.includes(item) || chunk.source !== source || chunk.ended) return;
+    chunk.ended = true;
+    if (chunk.startTimer) {
+      clearTimeout(chunk.startTimer);
+      chunk.startTimer = null;
+    }
+    try { source.disconnect(); } catch {}
+    item.endedDuration += chunk.duration;
+
+    const nextChunk = item.chunks.find((candidate) => candidate.scheduled && !candidate.ended);
+    if (nextChunk) {
+      this.currentSource = nextChunk.source;
+      return;
+    }
+
+    if (item.final) {
+      if (this._activeAudioItem === item) {
+        this._activeAudioItem = null;
+        this.currentSource = null;
+      }
+      item.audible = false;
+      this._removeQueueItem(item);
+      const next = this.queue[0];
+      const nextChunk = next?.kind === 'pcm' && next.chunks.find((candidate) => candidate.scheduled && !candidate.ended);
+      if (nextChunk && !next.audible) this._markPcmGroupStarted(next, nextChunk);
+      this._requestQueuePump();
+      this._settleIdleIfEmpty();
+      return;
+    }
+
+    item.audible = false;
+    this._activeAudioItem = null;
+    this.currentSource = null;
+    this.isPlaying = false;
+    if (typeof cancelAnimationFrame === 'function') cancelAnimationFrame(this._animFrame);
+    this._animFrame = null;
+    this._resetVisemes();
+    this.onIdle?.();
+  }
+
+  _markAudioItemStarted(item) {
+    if (!this.queue.includes(item) || item.kind !== 'audio') return;
+    item.state = 'playing';
+    this._activeAudioItem = item;
+    this.currentSource = item.source;
+    this._textTimeline = this._buildTextTimeline(item.text);
+    this._playbackDuration = item.duration || 1;
+    this._lastFrameClock = 0;
+
+    const ctx = this.audioContext;
+    const baseLatency = Number.isFinite(ctx.baseLatency) ? ctx.baseLatency : 0;
+    const outputLatency = (ctx.outputLatency && Number.isFinite(ctx.outputLatency)) ? ctx.outputLatency : 0;
+    this._audioStartCtxTime = item.startTime + baseLatency + outputLatency;
+
+    if (!item.playbackStarted) {
+      item.playbackStarted = true;
+      this.onPlaybackStart?.(item.text);
+    }
+    this._ensureAudioAnalysisLoop();
+  }
+
+  _ensureAudioAnalysisLoop() {
+    if (this._animFrame) return;
+    const analyze = () => {
+      this._analyzeFrame();
+      if (this.isPlaying && this._activeAudioItem) {
+        this._animFrame = requestAnimationFrame(analyze);
+      } else {
+        this._animFrame = null;
+      }
+    };
+    analyze();
+  }
+
+  _finishAudioItem(item, source) {
+    if (item.source !== source || !this.queue.includes(item)) return;
+    if (item.startTimer) {
+      clearTimeout(item.startTimer);
+      item.startTimer = null;
+    }
+    try { source.disconnect(); } catch {}
+    item.source = null;
+    if (this._activeAudioItem === item) {
+      this._activeAudioItem = null;
+      this.currentSource = null;
+    }
+    this._removeQueueItem(item);
+
+    const next = this.queue[0];
+    if (next?.kind === 'audio' && (next.state === 'scheduled' || next.state === 'playing')) {
+      this._markAudioItemStarted(next);
+    }
+
+    this._requestQueuePump();
+    this._settleIdleIfEmpty();
+  }
+
+  _handlePlaybackItemError(item, err) {
+    console.error('Audio playback error:', err);
+    const text = item.text || '';
+    this._removeQueueItem(item);
+    this._dispatchingPlaybackError = true;
+    try {
+      this.onPlaybackError?.(err, text);
+    } finally {
+      this._dispatchingPlaybackError = false;
+    }
+    this._requestQueuePump();
+    this._settleIdleIfEmpty();
+  }
+
+  _settleIdleIfEmpty() {
+    if (this.queue.length > 0 || this._activeUtterance || this._activeAudioItem) return;
+    if (!this.isPlaying && !this.currentSource) return;
+    this.isPlaying = false;
+    this.currentSource = null;
+    this._scheduleCursor = 0;
+    if (typeof cancelAnimationFrame === 'function') cancelAnimationFrame(this._animFrame);
+    this._animFrame = null;
+    this._resetVisemes();
+    this.onIdle?.();
   }
 
   _resetVisemes() {
@@ -460,11 +830,49 @@ export class AudioLipSync {
   }
 
   stop() {
+    const queuedItems = this.queue;
     this.queue = [];
     this.isPlaying = false;
     this._playbackGeneration++;
     this._speechGeneration++;
-    this._cancelPlaybackDecode();
+    for (const item of queuedItems) {
+      if (item.decodeTimeout) {
+        clearTimeout(item.decodeTimeout);
+        item.decodeTimeout = null;
+      }
+      if (item.decodeReject) {
+        item.decodeReject(new Error('Audio playback was cancelled.'));
+        item.decodeReject = null;
+      }
+      if (item.startTimer) {
+        clearTimeout(item.startTimer);
+        item.startTimer = null;
+      }
+      if (item.source) {
+        try { item.source.stop(); } catch {}
+        try { item.source.disconnect(); } catch {}
+        item.source = null;
+      }
+      if (item.chunks) {
+        for (const chunk of item.chunks) {
+          if (chunk.startTimer) {
+            clearTimeout(chunk.startTimer);
+            chunk.startTimer = null;
+          }
+          if (chunk.source) {
+            try { chunk.source.stop(); } catch {}
+            try { chunk.source.disconnect(); } catch {}
+            chunk.source = null;
+          }
+        }
+      }
+    }
+    this._playbackDecodeTimeout = null;
+    this._rejectPlaybackDecode = null;
+    this._queuePumpPromise = null;
+    this._resumePromise = null;
+    this._activeAudioItem = null;
+    this._scheduleCursor = 0;
     this._activeUtterance = null;
     if (this._speechTimeout) {
       clearTimeout(this._speechTimeout);
@@ -486,6 +894,7 @@ export class AudioLipSync {
     if (typeof cancelAnimationFrame === 'function') cancelAnimationFrame(this._animFrame);
     this._animFrame = null;
     this._resetVisemes();
+    this._notifyQueueChange();
   }
 
   dispose() {
@@ -527,16 +936,60 @@ export class AudioLipSync {
     }) || null;
   }
 
-  speakTextFallback(text) {
+  _enqueueTextItem(text, insertAtFront) {
     if (typeof window === 'undefined' || !('speechSynthesis' in window) || typeof SpeechSynthesisUtterance !== 'function') return false;
     const voice = this._selectMaleSpeechVoice(window.speechSynthesis);
     if (!voice) return false;
+
+    const item = this._createQueueItem('text', { text, voice });
+    if (insertAtFront) {
+      this.queue.unshift(item);
+    } else {
+      this.queue.push(item);
+    }
+    this._notifyQueueChange();
+    this._requestQueuePump();
+    return true;
+  }
+
+  _startQueuedTextIfReady() {
+    const item = this.queue[0];
+    if (!item || item.kind !== 'text' || item.state !== 'queued') return;
+    if (this._activeAudioItem || this.currentSource || this._activeUtterance) return;
+    this._startSpeechItem(item);
+  }
+
+  _startSpeechItem(item) {
+    item.state = 'playing';
+    const started = this._startSpeech(item.text, item.voice, {
+      onFinish: () => {
+        this._removeQueueItem(item);
+        this._requestQueuePump();
+        this._settleIdleIfEmpty();
+      },
+      onStart: () => {
+        this.onPlaybackStart?.(item.text);
+      },
+    });
+    if (!started) {
+      this._removeQueueItem(item);
+      this.onSpeechError?.();
+      this._requestQueuePump();
+      this._settleIdleIfEmpty();
+    }
+    return started;
+  }
+
+  _startSpeech(text, voice, { onFinish = null, onStart = null } = {}) {
+    if (typeof window === 'undefined' || !('speechSynthesis' in window) || typeof SpeechSynthesisUtterance !== 'function') return false;
+    const selectedVoice = voice || this._selectMaleSpeechVoice(window.speechSynthesis);
+    if (!selectedVoice) return false;
 
     this.isPlaying = true;
     const utterance = new SpeechSynthesisUtterance(text);
     const generation = ++this._speechGeneration;
     this._activeUtterance = utterance;
-    utterance.voice = voice;
+    utterance.voice = selectedVoice;
     utterance.rate = 1.0;
     utterance.pitch = 1.0;
 
@@ -603,6 +1056,13 @@ export class AudioLipSync {
       this._fallbackRAF = requestAnimationFrame(tick);
     };
 
+    utterance.onstart = () => {
+      if (this._speechGeneration !== generation || this._activeUtterance !== utterance) return;
+      this._fallbackLastClock = performance.now() / 1000;
+      onStart?.();
+      tick();
+    };
+
     const finish = () => {
       if (this._speechGeneration !== generation || this._activeUtterance !== utterance) return;
       if (this._fallbackRAF) {
@@ -614,9 +1074,10 @@ export class AudioLipSync {
         this._speechTimeout = null;
       }
       this._activeUtterance = null;
-      this.isPlaying = false;
+      if (!onFinish) this.isPlaying = false;
       this._resetVisemes();
-      this.onIdle?.();
+      onFinish?.();
+      if (!onFinish) this.onIdle?.();
     };
 
     utterance.onend = finish;
@@ -638,7 +1099,6 @@ export class AudioLipSync {
         try { window.speechSynthesis.cancel(); } catch {}
         finish();
       }, maxSpeechMs);
-      tick();
       return true;
     } catch {
       this._speechGeneration++;
@@ -651,5 +1111,12 @@ export class AudioLipSync {
       this._resetVisemes();
       return false;
     }
+  }
+
+  speakTextFallback(text) {
+    if (this._dispatchingPlaybackError || this.queue.length > 0 || this._activeAudioItem || this.currentSource) {
+      return this._enqueueTextItem(text, true);
+    }
+    return this._startSpeech(text, null);
   }
 }

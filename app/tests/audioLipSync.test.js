@@ -4,6 +4,59 @@ import { AudioLipSync } from '../src/services/audioLipSync.js';
 
 const EXPLICIT_MALE_VOICE = { name: 'English Male', lang: 'en-US' };
 
+function createAudioBlob(label = '') {
+  return { label, arrayBuffer: async () => new ArrayBuffer(8) };
+}
+
+function installAnimationFrameStub() {
+  const originalRAF = globalThis.requestAnimationFrame;
+  const originalCancelRAF = globalThis.cancelAnimationFrame;
+  globalThis.requestAnimationFrame = () => 1;
+  globalThis.cancelAnimationFrame = () => {};
+  return () => {
+    globalThis.requestAnimationFrame = originalRAF;
+    globalThis.cancelAnimationFrame = originalCancelRAF;
+  };
+}
+
+function createQueuedAudioHarness() {
+  const pendingDecodes = [];
+  const sources = [];
+  const context = {
+    state: 'running',
+    currentTime: 10,
+    baseLatency: 0,
+    outputLatency: 0,
+    destination: {},
+    decodeAudioData: () => new Promise((resolve, reject) => pendingDecodes.push({ resolve, reject })),
+    createBuffer: (channels, frameCount, sampleRate) => {
+      const data = new Float32Array(frameCount);
+      return {
+        channels,
+        sampleRate,
+        duration: frameCount / sampleRate,
+        getChannelData: () => data,
+      };
+    },
+    createBufferSource: () => {
+      const source = {
+        buffer: null,
+        connected: false,
+        disconnected: false,
+        stopped: false,
+        startWhen: null,
+        connect() { this.connected = true; },
+        disconnect() { this.disconnected = true; },
+        stop() { this.stopped = true; },
+        start(when = 0) { this.startWhen = when; },
+      };
+      sources.push(source);
+      return source;
+    },
+  };
+  return { context, pendingDecodes, sources };
+}
+
 test('speech analysis chooses the text timeline viseme', () => {
   const lipSync = new AudioLipSync();
   lipSync.audioContext = { currentTime: 1.5 };
@@ -280,6 +333,669 @@ test('provider audio playback reports a decode timeout instead of hanging', asyn
   }
 });
 
+test('queued provider audio predecodes while the current chunk is playing', async () => {
+  const restoreRAF = installAnimationFrameStub();
+  const { context, pendingDecodes, sources } = createQueuedAudioHarness();
+  const lipSync = new AudioLipSync();
+  lipSync.audioContext = context;
+  lipSync.analyser = {
+    connect() {},
+    getFloatTimeDomainData: (data) => data.fill(0),
+  };
+  lipSync._waveformData = new Float32Array(8);
+
+  try {
+    lipSync.enqueue(createAudioBlob('first'), 'first chunk');
+    await new Promise(setImmediate);
+    assert.equal(pendingDecodes.length, 1);
+    pendingDecodes[0].resolve({ duration: 0.5 });
+    await new Promise(setImmediate);
+    assert.equal(sources.length, 1);
+
+    lipSync.enqueue(createAudioBlob('second'), 'second chunk');
+    await new Promise(setImmediate);
+    assert.equal(pendingDecodes.length, 2, 'next chunk decode starts before the current source ends');
+    assert.equal(sources.length, 1, 'decoded-ahead chunk is not started until a schedule slot is known');
+  } finally {
+    lipSync.stop();
+    restoreRAF();
+  }
+});
+
+test('decoded provider chunks are scheduled in order without waiting for source end', async () => {
+  const restoreRAF = installAnimationFrameStub();
+  const { context, pendingDecodes, sources } = createQueuedAudioHarness();
+  const lipSync = new AudioLipSync();
+  lipSync.audioContext = context;
+  lipSync.analyser = {
+    connect() {},
+    getFloatTimeDomainData: (data) => data.fill(0),
+  };
+  lipSync._waveformData = new Float32Array(8);
+
+  try {
+    lipSync.enqueue(createAudioBlob('first'), 'alpha');
+    lipSync.enqueue(createAudioBlob('second'), 'bravo');
+    await new Promise(setImmediate);
+    assert.equal(pendingDecodes.length, 2);
+
+    pendingDecodes[0].resolve({ duration: 0.5 });
+    await new Promise(setImmediate);
+    pendingDecodes[1].resolve({ duration: 0.25 });
+    await new Promise(setImmediate);
+
+    assert.equal(sources.length, 2);
+    assert.equal(sources[0].startWhen, context.currentTime);
+    assert.equal(sources[1].startWhen, context.currentTime + 0.5);
+    assert.equal(lipSync.currentSource, sources[0]);
+
+    sources[0].onended();
+    assert.equal(lipSync.currentSource, sources[1]);
+    assert.deepEqual(lipSync._textTimeline, lipSync._buildTextTimeline('bravo'));
+  } finally {
+    lipSync.stop();
+    restoreRAF();
+  }
+});
+
+test('stopping provider playback cancels queued decodes and scheduled future sources', async () => {
+  const restoreRAF = installAnimationFrameStub();
+  const { context, pendingDecodes, sources } = createQueuedAudioHarness();
+  const lipSync = new AudioLipSync();
+  lipSync.audioContext = context;
+  lipSync.analyser = {
+    connect() {},
+    getFloatTimeDomainData: (data) => data.fill(0),
+  };
+  lipSync._waveformData = new Float32Array(8);
+
+  try {
+    lipSync.enqueue(createAudioBlob('first'), 'alpha');
+    lipSync.enqueue(createAudioBlob('second'), 'bravo');
+    await new Promise(setImmediate);
+    pendingDecodes[0].resolve({ duration: 0.5 });
+    pendingDecodes[1].resolve({ duration: 0.5 });
+    await new Promise(setImmediate);
+    assert.equal(sources.length, 2);
+
+    lipSync.stop();
+    assert.equal(sources[0].stopped, true);
+    assert.equal(sources[1].stopped, true);
+    assert.equal(lipSync.currentSource, null);
+    assert.equal(lipSync.queue.length, 0);
+  } finally {
+    lipSync.stop();
+    restoreRAF();
+  }
+});
+
+test('a queued decode resolving after stop cannot schedule stale audio', async () => {
+  const restoreRAF = installAnimationFrameStub();
+  const { context, pendingDecodes, sources } = createQueuedAudioHarness();
+  const lipSync = new AudioLipSync();
+  lipSync.audioContext = context;
+  lipSync.analyser = {
+    connect() {},
+    getFloatTimeDomainData: (data) => data.fill(0),
+  };
+  lipSync._waveformData = new Float32Array(8);
+
+  try {
+    lipSync.enqueue(createAudioBlob('first'), 'alpha');
+    lipSync.enqueue(createAudioBlob('second'), 'bravo');
+    await new Promise(setImmediate);
+    assert.equal(pendingDecodes.length, 2);
+
+    pendingDecodes[0].resolve({ duration: 0.5 });
+    await new Promise(setImmediate);
+    lipSync.stop();
+    pendingDecodes[1].resolve({ duration: 0.5 });
+    await new Promise(setImmediate);
+
+    assert.equal(sources.length, 1);
+    assert.equal(lipSync.currentSource, null);
+    assert.equal(lipSync.isPlaying, false);
+  } finally {
+    lipSync.stop();
+    restoreRAF();
+  }
+});
+
+test('chunk boundaries keep the next text timeline without resetting smooth visemes', async () => {
+  const restoreRAF = installAnimationFrameStub();
+  const { context, pendingDecodes, sources } = createQueuedAudioHarness();
+  const lipSync = new AudioLipSync();
+  lipSync.audioContext = context;
+  lipSync.analyser = {
+    connect() {},
+    getFloatTimeDomainData: (data) => data.fill(0.2),
+  };
+  lipSync._waveformData = new Float32Array(8);
+
+  try {
+    lipSync.enqueue(createAudioBlob('first'), 'aaa');
+    lipSync.enqueue(createAudioBlob('second'), 'ooo');
+    await new Promise(setImmediate);
+    pendingDecodes[0].resolve({ duration: 0.5 });
+    pendingDecodes[1].resolve({ duration: 0.5 });
+    await new Promise(setImmediate);
+
+    lipSync.visemeWeights.viseme_aa = 0.6;
+    lipSync.visemeDampers.get('viseme_aa').reset(0.6, 0);
+    sources[0].onended();
+
+    assert.deepEqual(lipSync._textTimeline, lipSync._buildTextTimeline('ooo'));
+    assert.ok(lipSync.visemeWeights.viseme_aa > 0, 'boundary transition should smooth from the previous mouth pose');
+    assert.equal(lipSync.visemeWeights.viseme_sil, 0);
+  } finally {
+    lipSync.stop();
+    restoreRAF();
+  }
+});
+
+test('enqueueText queues browser fallback behind current audio and preserves order', async () => {
+  const restoreRAF = installAnimationFrameStub();
+  const originalWindow = globalThis.window;
+  const originalUtterance = globalThis.SpeechSynthesisUtterance;
+  const { context, pendingDecodes, sources } = createQueuedAudioHarness();
+  const spoken = [];
+  globalThis.window = {
+    speechSynthesis: {
+      getVoices: () => [EXPLICIT_MALE_VOICE],
+      speak: (utterance) => spoken.push(utterance),
+      cancel: () => {},
+    },
+  };
+  globalThis.SpeechSynthesisUtterance = class {
+    constructor(text) { this.text = text; }
+  };
+
+  const lipSync = new AudioLipSync();
+  lipSync.audioContext = context;
+  lipSync.analyser = {
+    connect() {},
+    getFloatTimeDomainData: (data) => data.fill(0),
+  };
+  lipSync._waveformData = new Float32Array(8);
+
+  try {
+    lipSync.enqueue(createAudioBlob('first'), 'audio first');
+    await new Promise(setImmediate);
+    pendingDecodes[0].resolve({ duration: 0.5 });
+    await new Promise(setImmediate);
+    assert.equal(sources.length, 1);
+
+    assert.equal(lipSync.enqueueText('fallback second'), true);
+    assert.equal(spoken.length, 0);
+    sources[0].onended();
+    await new Promise(setImmediate);
+    assert.equal(spoken.length, 1);
+    assert.equal(spoken[0].text, 'fallback second');
+    spoken[0].onend();
+    assert.equal(lipSync.isPlaying, false);
+  } finally {
+    lipSync.stop();
+    restoreRAF();
+    globalThis.window = originalWindow;
+    globalThis.SpeechSynthesisUtterance = originalUtterance;
+  }
+});
+
+test('audio failure fallback inserts text before the remaining queued chunks', async () => {
+  const restoreRAF = installAnimationFrameStub();
+  const originalWindow = globalThis.window;
+  const originalUtterance = globalThis.SpeechSynthesisUtterance;
+  const { context, pendingDecodes, sources } = createQueuedAudioHarness();
+  const spoken = [];
+  globalThis.window = {
+    speechSynthesis: {
+      getVoices: () => [EXPLICIT_MALE_VOICE],
+      speak: (utterance) => spoken.push(utterance),
+      cancel: () => {},
+    },
+  };
+  globalThis.SpeechSynthesisUtterance = class {
+    constructor(text) { this.text = text; }
+  };
+
+  const lipSync = new AudioLipSync();
+  lipSync.audioContext = context;
+  lipSync.analyser = {
+    connect() {},
+    getFloatTimeDomainData: (data) => data.fill(0),
+  };
+  lipSync._waveformData = new Float32Array(8);
+  lipSync.onPlaybackError = (_error, text) => {
+    assert.equal(lipSync.speakTextFallback(text), true);
+  };
+
+  try {
+    lipSync.enqueue(createAudioBlob('bad'), 'bad audio');
+    lipSync.enqueue(createAudioBlob('good'), 'good audio');
+    await new Promise(setImmediate);
+    pendingDecodes[0].reject(new Error('decode failed'));
+    await new Promise(setImmediate);
+
+    assert.equal(spoken.length, 1);
+    assert.equal(spoken[0].text, 'bad audio');
+    assert.equal(sources.length, 0);
+
+    spoken[0].onend();
+    await new Promise(setImmediate);
+    assert.equal(pendingDecodes.length, 2);
+    pendingDecodes[1].resolve({ duration: 0.5 });
+    await new Promise(setImmediate);
+    assert.equal(sources.length, 1);
+    assert.equal(lipSync.currentSource, sources[0]);
+  } finally {
+    lipSync.stop();
+    restoreRAF();
+    globalThis.window = originalWindow;
+    globalThis.SpeechSynthesisUtterance = originalUtterance;
+  }
+});
+
+test('queue change callback reports pending provider phrase capacity', async () => {
+  const restoreRAF = installAnimationFrameStub();
+  const { context, pendingDecodes, sources } = createQueuedAudioHarness();
+  const lipSync = new AudioLipSync();
+  const counts = [];
+  lipSync.onQueueChange = (count) => counts.push(count);
+  lipSync.audioContext = context;
+  lipSync.analyser = {
+    connect() {},
+    getFloatTimeDomainData: (data) => data.fill(0),
+  };
+  lipSync._waveformData = new Float32Array(8);
+
+  try {
+    lipSync.enqueue(createAudioBlob('first'), 'alpha');
+    lipSync.enqueue(createAudioBlob('second'), 'bravo');
+    assert.equal(lipSync.pendingCount, 2);
+    assert.deepEqual(counts.slice(-2), [1, 2]);
+
+    await new Promise(setImmediate);
+    pendingDecodes[0].resolve({ duration: 0.5 });
+    pendingDecodes[1].resolve({ duration: 0.5 });
+    await new Promise(setImmediate);
+    sources[0].onended();
+    assert.equal(lipSync.pendingCount, 1);
+    assert.equal(counts.at(-1), 1);
+
+    lipSync.stop();
+    assert.equal(lipSync.pendingCount, 0);
+    assert.equal(counts.at(-1), 0);
+  } finally {
+    lipSync.stop();
+    restoreRAF();
+  }
+});
+
+test('streamed PCM chunks share one phrase timeline and count as one pending item', async () => {
+  const restoreRAF = installAnimationFrameStub();
+  const { context, sources } = createQueuedAudioHarness();
+  const lipSync = new AudioLipSync();
+  const starts = [];
+  lipSync.onPlaybackStart = (text) => starts.push(text);
+  lipSync.audioContext = context;
+  lipSync.analyser = {
+    connect() {},
+    getFloatTimeDomainData: (data) => data.fill(0.2),
+  };
+  lipSync._waveformData = new Float32Array(8);
+
+  try {
+    const speechId = lipSync.beginPcm('one phrase', { sampleRate: 10 });
+    assert.equal(lipSync.pendingCount, 1);
+    lipSync.enqueuePcm(new Float32Array([0.1, 0.1]), '', { speechId, sampleRate: 10 });
+    lipSync.enqueuePcm(new Float32Array([0.2, 0.2]), '', { speechId, sampleRate: 10, final: true });
+    await new Promise(setImmediate);
+
+    assert.equal(lipSync.pendingCount, 1);
+    assert.equal(sources.length, 2);
+    assert.equal(sources[0].startWhen, context.currentTime);
+    assert.equal(sources[1].startWhen, context.currentTime + 0.2);
+    assert.deepEqual(starts, ['one phrase']);
+    assert.deepEqual(lipSync._textTimeline, lipSync._buildTextTimeline('one phrase'));
+
+    lipSync.visemeWeights.viseme_aa = 0.5;
+    sources[0].onended();
+    assert.equal(lipSync.pendingCount, 1);
+    assert.ok(lipSync.visemeWeights.viseme_aa > 0, 'PCM chunk boundary should not reset viseme smoothing');
+
+    sources[1].onended();
+    assert.equal(lipSync.pendingCount, 0);
+    assert.equal(lipSync.isPlaying, false);
+  } finally {
+    lipSync.stop();
+    restoreRAF();
+  }
+});
+
+test('completed PCM phrases schedule across group boundaries without waiting for onended', async () => {
+  const restoreRAF = installAnimationFrameStub();
+  const { context, sources } = createQueuedAudioHarness();
+  const lipSync = new AudioLipSync();
+  const starts = [];
+  lipSync.onPlaybackStart = (text) => starts.push(text);
+  lipSync.audioContext = context;
+  lipSync.analyser = {
+    connect() {},
+    getFloatTimeDomainData: (data) => data.fill(0.2),
+  };
+  lipSync._waveformData = new Float32Array(8);
+
+  try {
+    const first = lipSync.beginPcm('first phrase', { sampleRate: 10 });
+    lipSync.enqueuePcm(new Float32Array([0.1, 0.1]), '', { speechId: first, sampleRate: 10, final: true });
+    const second = lipSync.beginPcm('second phrase', { sampleRate: 10 });
+    lipSync.enqueuePcm(new Float32Array([0.2, 0.2]), '', { speechId: second, sampleRate: 10, final: true });
+    await new Promise(setImmediate);
+
+    assert.equal(sources.length, 2);
+    assert.equal(sources[0].startWhen, context.currentTime);
+    assert.equal(sources[1].startWhen, context.currentTime + 0.2);
+    assert.deepEqual(starts, ['first phrase']);
+
+    sources[0].onended();
+    assert.equal(lipSync.currentSource, sources[1]);
+    assert.deepEqual(lipSync._textTimeline, lipSync._buildTextTimeline('second phrase'));
+  } finally {
+    lipSync.stop();
+    restoreRAF();
+  }
+});
+
+test('open PCM phrases block later phrase scheduling until they are finished', async () => {
+  const restoreRAF = installAnimationFrameStub();
+  const { context, sources } = createQueuedAudioHarness();
+  const lipSync = new AudioLipSync();
+  lipSync.audioContext = context;
+  lipSync.analyser = {
+    connect() {},
+    getFloatTimeDomainData: (data) => data.fill(0.2),
+  };
+  lipSync._waveformData = new Float32Array(8);
+
+  try {
+    const first = lipSync.beginPcm('open phrase', { sampleRate: 10 });
+    lipSync.enqueuePcm(new Float32Array([0.1, 0.1]), '', { speechId: first, sampleRate: 10 });
+    const second = lipSync.beginPcm('later phrase', { sampleRate: 10 });
+    lipSync.enqueuePcm(new Float32Array([0.2, 0.2]), '', { speechId: second, sampleRate: 10, final: true });
+    await new Promise(setImmediate);
+
+    assert.equal(sources.length, 1);
+    lipSync.finishPcm(first);
+    await new Promise(setImmediate);
+    assert.equal(sources.length, 2);
+    assert.equal(sources[1].startWhen, context.currentTime + 0.2);
+  } finally {
+    lipSync.stop();
+    restoreRAF();
+  }
+});
+
+test('PCM phrase timeline uses an estimated full phrase duration until final audio is known', async () => {
+  const restoreRAF = installAnimationFrameStub();
+  const { context } = createQueuedAudioHarness();
+  const lipSync = new AudioLipSync();
+  lipSync.audioContext = context;
+  lipSync.analyser = {
+    connect() {},
+    getFloatTimeDomainData: (data) => data.fill(0.2),
+  };
+  lipSync._waveformData = new Float32Array(8);
+
+  try {
+    const speechId = lipSync.beginPcm('this phrase should not finish in one short chunk', { sampleRate: 10 });
+    lipSync.enqueuePcm(new Float32Array([0.1]), '', { speechId, sampleRate: 10, duration: 99 });
+    await new Promise(setImmediate);
+
+    assert.ok(lipSync._playbackDuration > 0.1);
+    assert.ok(lipSync._playbackDuration < 99, 'duration option should not override actual PCM buffer seconds');
+  } finally {
+    lipSync.stop();
+    restoreRAF();
+  }
+});
+
+test('PCM starts at a zero audio clock and stopped phrase ids cannot recreate audio', async () => {
+  const restoreRAF = installAnimationFrameStub();
+  const { context, sources } = createQueuedAudioHarness();
+  context.currentTime = 0;
+  const lipSync = new AudioLipSync();
+  lipSync.audioContext = context;
+  lipSync.analyser = { connect() {}, getFloatTimeDomainData(data) { data.fill(0.2); } };
+  lipSync._waveformData = new Float32Array(8);
+  try {
+    const speechId = lipSync.beginPcm('same phrase across buffers', { sampleRate: 10 });
+    lipSync.enqueuePcm(new Float32Array(2), '', { speechId });
+    lipSync.enqueuePcm(new Float32Array(2), '', { speechId });
+    await new Promise(setImmediate);
+    assert.equal(lipSync.queue[0].startTime, 0);
+    assert.equal(sources[1].startWhen, 0.2);
+    lipSync.stop();
+    assert.ok(sources.every((source) => source.stopped));
+    assert.equal(lipSync.enqueuePcm(new Float32Array(2), '', { speechId }), false);
+    assert.equal(lipSync.pendingCount, 0);
+    assert.equal(lipSync.finishPcm(speechId), false);
+  } finally {
+    lipSync.stop();
+    restoreRAF();
+  }
+});
+
+test('PCM progress continues across stream stalls without rewinding the phrase timeline', async () => {
+  const restoreRAF = installAnimationFrameStub();
+  const { context, sources } = createQueuedAudioHarness();
+  const lipSync = new AudioLipSync();
+  lipSync.audioContext = context;
+  lipSync.analyser = {
+    connect() {},
+    getFloatTimeDomainData: (data) => data.fill(0.2),
+  };
+  lipSync._waveformData = new Float32Array(8);
+
+  try {
+    const speechId = lipSync.beginPcm('aaaa oooo', { sampleRate: 10 });
+    lipSync.enqueuePcm(new Float32Array([0.1, 0.1]), '', { speechId, sampleRate: 10 });
+    await new Promise(setImmediate);
+    const firstStart = lipSync._audioStartCtxTime;
+    sources[0].onended();
+
+    context.currentTime = 15;
+    lipSync.enqueuePcm(new Float32Array([0.2, 0.2]), '', { speechId, sampleRate: 10, final: true });
+    await new Promise(setImmediate);
+
+    assert.equal(lipSync._audioStartCtxTime, firstStart);
+    context.currentTime = sources[1].startWhen;
+    lipSync._analyzeFrame();
+    assert.equal(lipSync.queue[0].progress, 0.5, 'network stall must not count as spoken audio');
+    context.currentTime += 0.1;
+    lipSync._analyzeFrame();
+    assert.ok(lipSync.queue[0].progress > 0.7 && lipSync.queue[0].progress < 0.8);
+    assert.ok(lipSync.currentViseme !== 'viseme_sil');
+  } finally {
+    lipSync.stop();
+    restoreRAF();
+  }
+});
+
+test('PCM scheduling reports a bounded audio resume failure instead of leaving a pending queue', async () => {
+  const restoreRAF = installAnimationFrameStub();
+  const { context } = createQueuedAudioHarness();
+  const lipSync = new AudioLipSync();
+  const errors = [];
+  let idleEvents = 0;
+  context.state = 'suspended';
+  context.resume = async () => { throw new Error('resume denied'); };
+  lipSync.audioContext = context;
+  lipSync.analyser = {
+    connect() {},
+    getFloatTimeDomainData: (data) => data.fill(0),
+  };
+  lipSync._waveformData = new Float32Array(8);
+  lipSync.onPlaybackError = (error, text) => errors.push({ error, text });
+  lipSync.onIdle = () => { idleEvents++; };
+
+  try {
+    const speechId = lipSync.beginPcm('resume me', { sampleRate: 10 });
+    lipSync.enqueuePcm(new Float32Array([0.1]), '', { speechId, sampleRate: 10, final: true });
+    await new Promise(setImmediate);
+
+    assert.equal(errors.length, 1);
+    assert.equal(errors[0].text, 'resume me');
+    assert.match(errors[0].error.message, /resume denied|Audio output did not start/);
+    assert.equal(lipSync.pendingCount, 0);
+    assert.equal(idleEvents, 1);
+  } finally {
+    lipSync.stop();
+    restoreRAF();
+  }
+});
+
+test('open PCM phrases stay pending but go idle during stream stalls and restart on later chunks', async () => {
+  const restoreRAF = installAnimationFrameStub();
+  const { context, sources } = createQueuedAudioHarness();
+  const lipSync = new AudioLipSync();
+  const starts = [];
+  let idleEvents = 0;
+  lipSync.onPlaybackStart = (text) => starts.push(text);
+  lipSync.onIdle = () => { idleEvents++; };
+  lipSync.audioContext = context;
+  lipSync.analyser = {
+    connect() {},
+    getFloatTimeDomainData: (data) => data.fill(0.2),
+  };
+  lipSync._waveformData = new Float32Array(8);
+
+  try {
+    const speechId = lipSync.beginPcm('stalling phrase', { sampleRate: 10 });
+    lipSync.enqueuePcm(new Float32Array([0.1, 0.1]), '', { speechId, sampleRate: 10 });
+    await new Promise(setImmediate);
+    assert.equal(lipSync.pendingCount, 1);
+    assert.deepEqual(starts, ['stalling phrase']);
+
+    sources[0].onended();
+    assert.equal(lipSync.pendingCount, 1);
+    assert.equal(lipSync.isPlaying, false);
+    assert.equal(idleEvents, 1);
+
+    context.currentTime = 11;
+    lipSync.enqueuePcm(new Float32Array([0.2, 0.2]), '', { speechId, sampleRate: 10, final: true });
+    await new Promise(setImmediate);
+    assert.equal(sources.length, 2);
+    assert.equal(sources[1].startWhen, 11);
+    assert.deepEqual(starts, ['stalling phrase', 'stalling phrase']);
+
+    sources[1].onended();
+    assert.equal(lipSync.pendingCount, 0);
+    assert.equal(idleEvents, 2);
+  } finally {
+    lipSync.stop();
+    restoreRAF();
+  }
+});
+
+test('final queued browser fallback fires idle after speech finishes', async () => {
+  const restoreRAF = installAnimationFrameStub();
+  const originalWindow = globalThis.window;
+  const originalUtterance = globalThis.SpeechSynthesisUtterance;
+  const spoken = [];
+  globalThis.window = {
+    speechSynthesis: {
+      getVoices: () => [EXPLICIT_MALE_VOICE],
+      speak: (utterance) => spoken.push(utterance),
+      cancel: () => {},
+    },
+  };
+  globalThis.SpeechSynthesisUtterance = class {
+    constructor(text) { this.text = text; }
+  };
+
+  const lipSync = new AudioLipSync();
+  let idleEvents = 0;
+  lipSync.onIdle = () => { idleEvents++; };
+
+  try {
+    assert.equal(lipSync.enqueueText('queued fallback'), true);
+    await new Promise(setImmediate);
+    assert.equal(spoken.length, 1);
+    spoken[0].onend();
+    assert.equal(idleEvents, 1);
+    assert.equal(lipSync.isPlaying, false);
+  } finally {
+    lipSync.stop();
+    restoreRAF();
+    globalThis.window = originalWindow;
+    globalThis.SpeechSynthesisUtterance = originalUtterance;
+  }
+});
+
+test('browser fallback waits for audible speech start before animating the mouth', () => {
+  const originalWindow = globalThis.window;
+  const originalUtterance = globalThis.SpeechSynthesisUtterance;
+  const originalRAF = globalThis.requestAnimationFrame;
+  const originalCancelRAF = globalThis.cancelAnimationFrame;
+  let utterance;
+  let frames = 0;
+  globalThis.window = { speechSynthesis: {
+    getVoices: () => [EXPLICIT_MALE_VOICE],
+    speak: (value) => { utterance = value; },
+    cancel() {},
+  } };
+  globalThis.SpeechSynthesisUtterance = class { constructor(text) { this.text = text; } };
+  globalThis.requestAnimationFrame = () => ++frames;
+  globalThis.cancelAnimationFrame = () => {};
+  const lipSync = new AudioLipSync();
+  try {
+    assert.equal(lipSync.speakTextFallback('aaaa oooo'), true);
+    assert.equal(frames, 0);
+    assert.equal(lipSync.currentIntensity, 0);
+    utterance.onstart();
+    assert.equal(frames, 1);
+    assert.ok(lipSync.currentIntensity > 0);
+    lipSync.stop();
+    utterance.onstart();
+    assert.equal(frames, 1, 'a cancelled utterance cannot restart animation');
+  } finally {
+    lipSync.stop();
+    globalThis.window = originalWindow;
+    globalThis.SpeechSynthesisUtterance = originalUtterance;
+    globalThis.requestAnimationFrame = originalRAF;
+    globalThis.cancelAnimationFrame = originalCancelRAF;
+  }
+});
+
+test('finishPcm closes a drained open phrase and frees pending capacity', async () => {
+  const restoreRAF = installAnimationFrameStub();
+  const { context, sources } = createQueuedAudioHarness();
+  const lipSync = new AudioLipSync();
+  const counts = [];
+  lipSync.onQueueChange = (count) => counts.push(count);
+  lipSync.audioContext = context;
+  lipSync.analyser = {
+    connect() {},
+    getFloatTimeDomainData: (data) => data.fill(0.2),
+  };
+  lipSync._waveformData = new Float32Array(8);
+
+  try {
+    const speechId = lipSync.beginPcm('short phrase', { sampleRate: 10 });
+    lipSync.enqueuePcm(new Float32Array([0.1, 0.1]), '', { speechId, sampleRate: 10 });
+    await new Promise(setImmediate);
+    sources[0].onended();
+    assert.equal(lipSync.pendingCount, 1);
+
+    assert.equal(lipSync.finishPcm(speechId), true);
+    assert.equal(lipSync.pendingCount, 0);
+    assert.equal(counts.at(-1), 0);
+  } finally {
+    lipSync.stop();
+    restoreRAF();
+  }
+});
+
 test('stopping playback clears a pending provider audio decode without a stale error', async () => {
   const originalRAF = globalThis.requestAnimationFrame;
   const originalCancelRAF = globalThis.cancelAnimationFrame;
@@ -348,8 +1064,8 @@ test('an older decode settling cannot clear the active decode deadline', async (
   };
 
   try {
-    const first = lipSync._decodePlaybackAudio(new ArrayBuffer(1));
-    const second = lipSync._decodePlaybackAudio(new ArrayBuffer(1));
+    const first = lipSync._decodeAudioBufferForItem(new ArrayBuffer(1), {});
+    const second = lipSync._decodeAudioBufferForItem(new ArrayBuffer(1), {});
     assert.equal(lipSync._playbackDecodeTimeout, 2);
 
     resolvers[0]({ duration: 1 });

@@ -4,9 +4,11 @@ import { ChatPanel } from './components/ChatPanel';
 import { TextInput } from './components/TextInput';
 import { StatusBar } from './components/StatusBar';
 import { ApiKeyPanel } from './components/ApiKeyPanel';
-import { transcribe, streamChat, synthesize, checkHealth, REQUIRES_USER_KEY, apiRelayOrigin } from './services/nim';
+import { transcribe, streamChat, streamSynthesize, checkHealth, REQUIRES_USER_KEY, apiRelayOrigin } from './services/nim';
 import { AudioLipSync } from './services/audioLipSync';
+import { SpeechStream } from './services/speechStream';
 import { canUseWebGL } from './utils/webgl';
+import { watchServiceHealth } from './services/serviceHealth';
 
 const AvatarScene = lazy(() => import('./components/AvatarScene'));
 
@@ -47,6 +49,7 @@ function App() {
   const messagesRef = useRef([]);
   const [streamingText, setStreamingText] = useState('');
   const [stage, setStage] = useState('idle');
+  const [isResponding, setIsResponding] = useState(false);
   const [errorMessage, setErrorMessage] = useState('');
   const [connection, setConnection] = useState({ checked: false, online: false, hasNvidiaKey: false });
   const [speechMode, setSpeechMode] = useState('');
@@ -58,37 +61,32 @@ function App() {
   const [webglAvailable] = useState(() => canUseWebGL());
   const [sceneState, setSceneState] = useState(() => webglAvailable ? 'loading' : 'unavailable');
   const requestRef = useRef(null);
+  const speechStreamRef = useRef(null);
   const pendingMessageRef = useRef(null);
   const errorTimerRef = useRef(null);
   const handleSceneReady = useCallback(() => setSceneState('ready'), []);
 
   useEffect(() => {
-    let active = true;
-    let healthTimer;
-    const refreshHealth = async () => {
-      const health = await checkHealth();
-      if (!active) return;
-      const ready = Boolean(health.ok && (health.requiresUserKey || health.hasNvidiaKey));
-      setConnection({ checked: true, online: Boolean(health.ok), hasNvidiaKey: Boolean(health.hasNvidiaKey), requiresUserKey: health.requiresUserKey === true });
-      healthTimer = setTimeout(refreshHealth, ready ? 30_000 : 5_000);
-    };
-    refreshHealth();
-    lipSync.onIdle = () => setStage((current) => current === 'speaking' ? 'idle' : current);
+    const stopHealth = watchServiceHealth({ probe: (signal) => checkHealth(5000, { signal }), onChange: setConnection });
+    lipSync.onIdle = () => setStage((current) => current === 'speaking' ? (requestRef.current ? 'synthesizing' : 'idle') : current);
+    lipSync.onPlaybackStart = () => setStage('speaking');
+    lipSync.onQueueChange = () => speechStreamRef.current?.resume();
     lipSync.onPlaybackError = (_error, text) => {
       setSpeechMode('Browser voice (audio playback unavailable)');
       if (!lipSync.speakTextFallback(text)) {
         setSpeechMode('Text only (male voice unavailable)');
-        setStage('idle');
+        if (!requestRef.current) setStage('idle');
       }
     };
     lipSync.onSpeechError = () => setSpeechMode('Text only (male voice unavailable)');
     return () => {
-      active = false;
-      clearTimeout(healthTimer);
+      stopHealth();
       clearTimeout(errorTimerRef.current);
       requestRef.current?.abort();
       requestRef.current = null;
       lipSync.onIdle = null;
+      lipSync.onPlaybackStart = null;
+      lipSync.onQueueChange = null;
       lipSync.onPlaybackError = null;
       lipSync.onSpeechError = null;
       lipSync.dispose?.();
@@ -118,6 +116,8 @@ function App() {
     clearTimeout(errorTimerRef.current);
     requestRef.current?.abort();
     requestRef.current = null;
+    speechStreamRef.current = null;
+    setIsResponding(false);
     const pendingMessage = pendingMessageRef.current;
     if (pendingMessage) {
       messagesRef.current = messagesRef.current.map((message) => message === pendingMessage ? { ...message, failed: true, cancelled: true } : message);
@@ -153,6 +153,7 @@ function App() {
     const controller = existingRequest || new AbortController();
     const requestKey = apiKeyRef.current;
     requestRef.current = controller;
+    setIsResponding(true);
     const isCurrent = () => requestRef.current === controller && !controller.signal.aborted;
     clearTimeout(errorTimerRef.current);
     lipSync.stop();
@@ -167,12 +168,51 @@ function App() {
     setErrorMessage('');
     setStage('thinking');
 
+    const speech = new SpeechStream({
+      signal: controller.signal,
+      getPendingCount: () => lipSync.pendingCount,
+      onSynthesizing: () => { if (isCurrent() && !lipSync.isPlaying) setStage('synthesizing'); },
+      synthesize: async (phrase) => {
+        const group = lipSync.beginPcm(phrase);
+        let receivedAudio = false;
+        try {
+          await streamSynthesize(phrase, {
+            signal: controller.signal,
+            apiKey: requestKey,
+            onChunk: (samples) => {
+              if (!isCurrent()) return;
+              if (!lipSync.enqueuePcm(samples, phrase, { speechId: group })) throw new Error('Audio output is no longer available.');
+              receivedAudio = true;
+              setSpeechMode('Jason · NVIDIA voice');
+            },
+          });
+        } catch (error) {
+          error.partialAudio = receivedAudio;
+          throw error;
+        } finally {
+          if (isCurrent()) lipSync.finishPcm(group);
+        }
+      },
+      onError: (error) => {
+        console.error('Speech service unavailable:', error);
+        setSpeechMode(error.partialAudio ? 'Voice interrupted · full response in chat' : 'Browser voice (speech service unavailable)');
+      },
+      onFallback: (phrase) => {
+        if (!lipSync.enqueueText(phrase)) setSpeechMode('Text only (male voice unavailable)');
+      },
+    });
+    speechStreamRef.current = speech;
+
     let replyCommitted = false;
     try {
       const reply = await streamChat([SYSTEM_PROMPT, ...context, userMessage], {
         signal: controller.signal,
         apiKey: requestKey,
-        onToken: (_token, full) => { if (isCurrent()) setStreamingText(full); },
+        onToken: (token, full) => {
+          if (!isCurrent()) return;
+          setStreamingText(full);
+          speech.push(token);
+        },
       });
       if (!isCurrent()) return false;
       if (!reply.trim()) throw new Error('The AI returned an empty reply. Please try again.');
@@ -184,31 +224,16 @@ function App() {
       setSentMessage(userMessage);
       pendingMessageRef.current = null;
 
-      // One playback request per reply keeps browser speech and provider audio in order.
-      let playing = false;
-      setStage('synthesizing');
-      try {
-        const audioBlob = await synthesize(reply, { signal: controller.signal, apiKey: requestKey });
-        if (!isCurrent()) return true;
-        setStage('speaking');
-        lipSync.enqueue(audioBlob, reply);
-        playing = true;
-        setSpeechMode('Jason · NVIDIA voice');
-      } catch (error) {
-        if (!isCurrent()) return replyCommitted;
-        console.error('Speech service unavailable:', error);
-        setSpeechMode('Browser voice (speech service unavailable)');
-      }
-
-      if (!playing) {
-        setStage('speaking');
-        playing = lipSync.speakTextFallback(reply);
-        if (!playing) setSpeechMode('Text only (male voice unavailable)');
-      }
-      if (!playing) setStage('idle');
+      // Flush the final phrase while earlier audio keeps playing. The stream
+      // limits synthesis lookahead and preserves phrase order.
+      await speech.finish();
+      if (!isCurrent()) return true;
+      if (!lipSync.isPlaying) setStage('idle');
       return true;
     } catch (error) {
       if (!isCurrent()) return replyCommitted;
+      controller.abort();
+      lipSync.stop();
       if (error.status === 401 && requestKey) setKeyPanelOpen(true);
       if (!replyCommitted) {
         messagesRef.current = messagesRef.current.map((message) => (
@@ -222,6 +247,8 @@ function App() {
     } finally {
       if (requestRef.current === controller) {
         requestRef.current = null;
+        speechStreamRef.current = null;
+        setIsResponding(false);
         pendingMessageRef.current = null;
       }
     }
@@ -258,7 +285,7 @@ function App() {
   const ready = connection.online && (visitorKeys ? Boolean(apiKey) : connection.hasNvidiaKey);
   const setupNoticeVisible = connection.checked && (!connection.online || (!visitorKeys && !connection.hasNvidiaKey));
   const controlDescription = setupNoticeVisible ? 'setup-notice' : keyPanelVisible ? 'api-key-notice' : undefined;
-  const isBusy = stage === 'starting' || stage === 'recording' || stage === 'transcribing' || stage === 'thinking' || stage === 'synthesizing';
+  const isBusy = isResponding || stage === 'starting' || stage === 'recording' || stage === 'transcribing' || stage === 'thinking' || stage === 'synthesizing';
 
   return (
     <div className="app">

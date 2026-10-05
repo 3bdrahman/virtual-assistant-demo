@@ -130,6 +130,7 @@ function createFakeProvider() {
       if (state.mode === 'tts-error' || state.mode === 'tts-fallback') {
         return Response.json({ error: 'tts unavailable' }, { status: 503 });
       }
+      if (href.endsWith('/synthesize_online')) return new Response(audio.subarray(44));
       return new Response(audio, { status: 200, headers: { 'Content-Type': 'audio/wav' } });
     }
 

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { streamChat, synthesize, transcribe, checkHealth } from '../src/services/nim.js';
+import { streamChat, synthesize, streamSynthesize, transcribe, checkHealth } from '../src/services/nim.js';
 import { encodeMonoPcm16 } from '../src/services/wav.js';
 
 function sseResponse(chunks) {
@@ -266,4 +266,79 @@ test('chat reports the retryable timeout from a stream instead of losing the fai
   globalThis.fetch = async () => sseResponse(['data: {"error":{"code":"provider_timeout"}}\n\n']);
   try { await assert.rejects(streamChat([]), /timed out.*retry/i); }
   finally { globalThis.fetch = originalFetch; }
+});
+
+test('streamed speech yields PCM before the response finishes and handles split samples', async () => {
+  const originalFetch = globalThis.fetch;
+  let upstream;
+  let cancelled = false;
+  let receivedFirst;
+  const first = new Promise((resolve) => { receivedFirst = resolve; });
+  const chunks = [];
+  globalThis.fetch = async (_url, options) => {
+    assert.deepEqual(JSON.parse(options.body), { text: 'Hello', stream: true });
+    assert.equal(options.headers.Authorization, 'Bearer nvapi-test');
+    return new Response(new ReadableStream({
+      start(controller) { upstream = controller; },
+      cancel() { cancelled = true; },
+    }), { headers: { 'Content-Type': 'audio/pcm;rate=44100;channels=1' } });
+  };
+  try {
+    const pending = streamSynthesize('Hello', { apiKey: 'nvapi-test', onChunk: (samples) => {
+      chunks.push(samples);
+      receivedFirst();
+    } });
+    await new Promise(setImmediate);
+    const bytes = new Uint8Array(8822);
+    const view = new DataView(bytes.buffer);
+    view.setInt16(0, -32768, true);
+    view.setInt16(2, 32767, true);
+    view.setInt16(8820, -16384, true);
+    upstream.enqueue(bytes.slice(0, 1));
+    upstream.enqueue(bytes.slice(1));
+    await first;
+    assert.equal(chunks[0].length, 4410);
+    assert.equal(chunks[0][0], -1);
+    assert.equal(chunks[0][1], 32767 / 32768);
+    assert.equal(cancelled, false);
+    upstream.close();
+    const result = await pending;
+    assert.equal(result.sampleCount, 4411);
+    assert.equal(chunks.at(-1)[0], -0.5);
+  } finally { globalThis.fetch = originalFetch; }
+});
+
+test('streamed speech rejects empty, truncated, or unexpected audio and cancels the reader', async () => {
+  const originalFetch = globalThis.fetch;
+  try {
+    for (const body of [new Uint8Array(), Uint8Array.of(0)]) {
+      globalThis.fetch = async () => new Response(body, { headers: { 'Content-Type': 'audio/pcm;rate=44100;channels=1' } });
+      await assert.rejects(streamSynthesize('Hello', { onChunk() {} }), /empty|truncated/i);
+    }
+    for (const type of ['application/json', 'audio/wav', 'audio/pcm;rate=16000;channels=1']) {
+      let cancelled = false;
+      globalThis.fetch = async () => new Response(new ReadableStream({ cancel() { cancelled = true; } }), { headers: { 'Content-Type': type } });
+      await assert.rejects(streamSynthesize('Hello', { onChunk() {} }), /invalid.*audio/i);
+      assert.equal(cancelled, true);
+    }
+  } finally { globalThis.fetch = originalFetch; }
+});
+
+test('streamed speech cancellation discards a partial sample and prevents late chunks', async () => {
+  const originalFetch = globalThis.fetch;
+  const controller = new AbortController();
+  let cancelled = false;
+  const chunks = [];
+  globalThis.fetch = async () => new Response(new ReadableStream({
+    start(stream) { stream.enqueue(Uint8Array.of(0)); },
+    cancel() { cancelled = true; },
+  }), { headers: { 'Content-Type': 'audio/pcm;rate=44100;channels=1' } });
+  try {
+    const pending = streamSynthesize('Hello', { signal: controller.signal, onChunk: (chunk) => chunks.push(chunk) });
+    await new Promise(setImmediate);
+    controller.abort();
+    await assert.rejects(pending, { name: 'AbortError' });
+    assert.equal(cancelled, true);
+    assert.deepEqual(chunks, []);
+  } finally { globalThis.fetch = originalFetch; }
 });
