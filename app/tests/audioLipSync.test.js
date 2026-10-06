@@ -70,6 +70,39 @@ test('speech analysis chooses the text timeline viseme', () => {
   assert.equal(lipSync.currentViseme, 'viseme_aa');
 });
 
+test('mouth timing follows the device output timestamp instead of the render-ahead clock', () => {
+  const lipSync = new AudioLipSync();
+  lipSync.audioContext = { currentTime: 10, getOutputTimestamp: () => ({ contextTime: 9.15, performanceTime: performance.now() }) };
+  lipSync._audioStartCtxTime = 9;
+  lipSync._playbackDuration = 1;
+  lipSync._textTimeline = [
+    { viseme: 'viseme_aa', startFrac: 0, endFrac: 0.5 },
+    { viseme: 'viseme_FF', startFrac: 0.5, endFrac: 1 },
+  ];
+  lipSync._waveformData = new Float32Array(64);
+  lipSync.analyser = { getFloatTimeDomainData: (data) => data.fill(0.12) };
+  lipSync._analyzeFrame();
+  assert.equal(lipSync.currentViseme, 'viseme_aa');
+});
+
+test('quiet bilabial closure releases the previous open vowel quickly', () => {
+  const lipSync = new AudioLipSync();
+  lipSync.audioContext = { currentTime: 0.15 };
+  lipSync._audioStartCtxTime = 0;
+  lipSync._playbackDuration = 1;
+  lipSync._textTimeline = [{ viseme: 'viseme_PP', startFrac: 0, endFrac: 1 }];
+  lipSync._waveformData = new Float32Array(64);
+  lipSync.analyser = { getFloatTimeDomainData: (data) => data.fill(0.0001) };
+  lipSync.visemeWeights.viseme_aa = 0.75;
+  lipSync.visemeDampers.get('viseme_aa').reset(0.75, 0);
+  for (let frame = 0; frame < 4; frame++) {
+    lipSync._lastFrameClock = performance.now() / 1000 - 1 / 60;
+    lipSync._analyzeFrame();
+  }
+  assert.ok(lipSync.visemeWeights.viseme_PP > 0.9);
+  assert.ok(lipSync.visemeWeights.viseme_aa < 0.04);
+});
+
 test('audible narrow-band audio produces substantial mouth movement and silence releases it', () => {
   const lipSync = new AudioLipSync();
   let audible = true;
@@ -785,6 +818,70 @@ test('PCM starts at a zero audio clock and stopped phrase ids cannot recreate au
   }
 });
 
+test('acoustic retiming is asynchronous and late worker results cannot affect a new reply', async () => {
+  const originalWorker = globalThis.Worker;
+  const restoreRAF = installAnimationFrameStub();
+  const workers = [];
+  globalThis.Worker = class {
+    constructor() { workers.push(this); }
+    postMessage(message) { this.message = message; }
+    terminate() { this.terminated = true; }
+  };
+  const { context, sources } = createQueuedAudioHarness();
+  const lipSync = new AudioLipSync();
+  lipSync.audioContext = context;
+  lipSync.analyser = { connect() {}, getFloatTimeDomainData(data) { data.fill(0.2); } };
+  lipSync._waveformData = new Float32Array(8);
+  try {
+    const first = lipSync.beginPcm('paper', { sampleRate: 10000 });
+    lipSync.enqueuePcm(new Float32Array(2000).fill(0.1), '', { speechId: first });
+    lipSync.finishPcm(first);
+    await new Promise(setImmediate);
+    assert.equal(sources.length, 1, 'playback starts without waiting for a worker reply');
+    assert.equal(workers.length, 1);
+    const request = workers[0].message;
+    assert.equal(lipSync.queue[0].alignedTimeline, undefined);
+    workers[0].onmessage({ data: { ...request, timeline: [{ viseme: 'viseme_PP', start: 0, end: 0.1 }] } });
+    assert.equal(lipSync.queue[0].alignedTimeline[0].viseme, 'viseme_PP');
+    lipSync.stop();
+    lipSync.beginPcm('a new reply');
+    workers[0].onmessage({ data: { ...request, timeline: [{ viseme: 'viseme_PP', start: 0, end: 0.1 }] } });
+    assert.equal(lipSync.queue[0].alignedTimeline, undefined);
+    await lipSync.dispose();
+    assert.equal(workers[0].terminated, true);
+  } finally {
+    lipSync.stop();
+    globalThis.Worker = originalWorker;
+    restoreRAF();
+  }
+});
+
+test('browser speech word boundaries re-anchor pronunciation and ignore cancelled utterances', () => {
+  const originalWindow = globalThis.window;
+  const originalUtterance = globalThis.SpeechSynthesisUtterance;
+  const restoreRAF = installAnimationFrameStub();
+  const spoken = [];
+  globalThis.window = { speechSynthesis: { getVoices: () => [EXPLICIT_MALE_VOICE], speak: (item) => spoken.push(item), cancel() {} } };
+  globalThis.SpeechSynthesisUtterance = class { constructor(text) { this.text = text; } };
+  const lipSync = new AudioLipSync();
+  try {
+    lipSync.speakTextFallback('my blue bag');
+    spoken[0].onstart();
+    const expected = lipSync._textTimeline.find((unit) => unit.word === 'blue').startFrac;
+    spoken[0].onboundary({ name: 'word', charIndex: 3 });
+    assert.equal(lipSync._fallbackProgress, expected);
+    lipSync.stop();
+    lipSync.speakTextFallback('new reply');
+    spoken[0].onboundary({ name: 'word', charIndex: 8 });
+    assert.equal(lipSync._fallbackProgress, 0);
+  } finally {
+    lipSync.stop();
+    restoreRAF();
+    globalThis.window = originalWindow;
+    globalThis.SpeechSynthesisUtterance = originalUtterance;
+  }
+});
+
 test('PCM progress continues across stream stalls without rewinding the phrase timeline', async () => {
   const restoreRAF = installAnimationFrameStub();
   const { context, sources } = createQueuedAudioHarness();
@@ -1156,7 +1253,7 @@ test('text timelines keep approximate mouth movement for digits and unicode repl
   const timeline = lipSync._buildTextTimeline('2026 café Привет');
 
   assert.ok(timeline.some((item) => item.viseme !== 'viseme_sil'));
-  assert.equal(timeline[0].viseme, 'viseme_aa');
+  assert.equal(timeline[0].viseme, 'viseme_DD', 'a spoken number starting with two uses the T sound');
   assert.ok(timeline.filter((item) => item.viseme !== 'viseme_sil').length >= 4);
 });
 

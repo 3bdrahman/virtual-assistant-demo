@@ -42,8 +42,17 @@ async function waitForReply(page, previousReplies) {
 function probes() {
   const contexts = [];
   const stats = { sourcesStarted: 0, sourcesEnded: 0, decodedDuration: 0, analyserFrames: 0, rmsPeak: 0,
-    morphUploads: 0, mouthPeak: 0, lastMouthPeak: 0 };
+    morphUploads: 0, mouthPeak: 0, lastMouthPeak: 0, acousticTimelines: 0 };
   window.__demoProbe = { snapshot: () => ({ ...stats, audioContexts: contexts.map((ctx) => ({ state: ctx.state, time: ctx.currentTime })) }) };
+  const SpeechWorker = window.Worker;
+  if (SpeechWorker) window.Worker = class extends SpeechWorker {
+    constructor(url, options) {
+      super(url, options);
+      if (String(url).includes('speechTiming')) this.addEventListener('message', ({ data }) => {
+        if (Array.isArray(data?.timeline) && data.timeline.length) stats.acousticTimelines++;
+      });
+    }
+  };
   const AudioContextClass = window.AudioContext || window.webkitAudioContext;
   if (AudioContextClass) {
     const analyser = AudioContextClass.prototype.createAnalyser;
@@ -132,6 +141,7 @@ try {
   evidence.speechMode = await page.locator('.speech-mode').textContent();
   await stage('rendered mouth movement');
   await page.waitForFunction(() => window.__demoProbe.snapshot().mouthPeak > 0.1, null, { timeout: 15000 });
+  await page.waitForFunction(() => window.__demoProbe.snapshot().acousticTimelines > 0, null, { timeout: 15000 });
   evidence.playback = await page.evaluate(() => window.__demoProbe.snapshot());
   assert.match(evidence.speechMode, /Jason/);
   evidence.speech = true;

@@ -1,148 +1,19 @@
 /**
- * Audio playback with estimated text-driven lip-sync.
+ * Streamed audio playback with pronunciation-driven, acoustically retimed lips.
  *
- * Uses a text timeline modulated by the playback volume for NVIDIA WAV
- * audio, and the same timeline with estimated timing for browser speech.
+ * PCM poses follow the device output clock. Browser speech uses word boundary
+ * events when available; pronunciation inside each word remains an estimate.
  */
 
-// ── Oculus Viseme set (matches RPM Wolf3D_Head morph targets) ──
-const VISEMES = {
-  sil: 'viseme_sil',
-  PP:  'viseme_PP',
-  FF:  'viseme_FF',
-  TH:  'viseme_TH',
-  DD:  'viseme_DD',
-  kk:  'viseme_kk',
-  CH:  'viseme_CH',
-  SS:  'viseme_SS',
-  nn:  'viseme_nn',
-  RR:  'viseme_RR',
-  aa:  'viseme_aa',
-  E:   'viseme_E',
-  I:   'viseme_I',
-  O:   'viseme_O',
-  U:   'viseme_U',
-};
+import { SpringDamper } from '../utils/springDamper.js';
+import { VISEMES, buildVisemeTimeline } from './visemePronunciation.js';
+import { SpeechTiming } from './speechTiming.js';
+import { articulationTargets } from './visemeArticulation.js';
 
 const ALL_VISEME_KEYS = Object.values(VISEMES);
-
-// FSM phoneme categories
-const FSM = { silence: 0, vowel: 1, plosive: 2, fricative: 3 };
-
-const VISEME_CATEGORY = {
-  [VISEMES.sil]: FSM.silence,
-  [VISEMES.PP]:  FSM.plosive,
-  [VISEMES.FF]:  FSM.fricative,
-  [VISEMES.TH]:  FSM.fricative,
-  [VISEMES.DD]:  FSM.plosive,
-  [VISEMES.kk]:  FSM.plosive,
-  [VISEMES.CH]:  FSM.fricative,
-  [VISEMES.SS]:  FSM.fricative,
-  [VISEMES.nn]:  FSM.plosive,
-  [VISEMES.RR]:  FSM.fricative,
-  [VISEMES.aa]:  FSM.vowel,
-  [VISEMES.E]:   FSM.vowel,
-  [VISEMES.I]:   FSM.vowel,
-  [VISEMES.O]:   FSM.vowel,
-  [VISEMES.U]:   FSM.vowel,
-};
-
-// ── Coarticulation: secondary shapes that blend with the primary ──
-const COARTICULATION = {
-  [VISEMES.aa]: { [VISEMES.E]: 0.15, [VISEMES.O]: 0.10, [VISEMES.RR]: 0.08 },
-  [VISEMES.E]:  { [VISEMES.aa]: 0.12, [VISEMES.I]: 0.10, [VISEMES.RR]: 0.05 },
-  [VISEMES.I]:  { [VISEMES.E]: 0.12, [VISEMES.SS]: 0.08, [VISEMES.CH]: 0.05 },
-  [VISEMES.O]:  { [VISEMES.U]: 0.15, [VISEMES.aa]: 0.10, [VISEMES.RR]: 0.08 },
-  [VISEMES.U]:  { [VISEMES.O]: 0.15, [VISEMES.PP]: 0.05, [VISEMES.FF]: 0.04 },
-  [VISEMES.PP]: { [VISEMES.nn]: 0.08, [VISEMES.FF]: 0.06, [VISEMES.U]: 0.05 },
-  [VISEMES.FF]: { [VISEMES.TH]: 0.10, [VISEMES.PP]: 0.06 },
-  [VISEMES.TH]: { [VISEMES.FF]: 0.08, [VISEMES.DD]: 0.08, [VISEMES.nn]: 0.05 },
-  [VISEMES.DD]: { [VISEMES.nn]: 0.10, [VISEMES.kk]: 0.08, [VISEMES.TH]: 0.06 },
-  [VISEMES.kk]: { [VISEMES.DD]: 0.08, [VISEMES.nn]: 0.06, [VISEMES.RR]: 0.05 },
-  [VISEMES.CH]: { [VISEMES.SS]: 0.10, [VISEMES.I]: 0.06 },
-  [VISEMES.SS]: { [VISEMES.CH]: 0.08, [VISEMES.I]: 0.08, [VISEMES.TH]: 0.05 },
-  [VISEMES.nn]: { [VISEMES.DD]: 0.10, [VISEMES.kk]: 0.05 },
-  [VISEMES.RR]: { [VISEMES.aa]: 0.10, [VISEMES.O]: 0.08, [VISEMES.E]: 0.06 },
-};
-
-// ── Character → viseme mapping for estimated speech timing ─────
-const CHAR_TO_VISEME = {
-  // Vowels
-  'a': VISEMES.aa, 'A': VISEMES.aa,
-  'e': VISEMES.E,  'E': VISEMES.E,
-  'i': VISEMES.I,  'I': VISEMES.I,
-  'o': VISEMES.O,  'O': VISEMES.O,
-  'u': VISEMES.U,  'U': VISEMES.U,
-  'y': VISEMES.I,  'Y': VISEMES.I,
-  // Plosives
-  'p': VISEMES.PP, 'P': VISEMES.PP,
-  'b': VISEMES.PP, 'B': VISEMES.PP,
-  't': VISEMES.DD, 'T': VISEMES.DD,
-  'd': VISEMES.DD, 'D': VISEMES.DD,
-  'k': VISEMES.kk, 'K': VISEMES.kk,
-  'g': VISEMES.kk, 'G': VISEMES.kk,
-  // Fricatives
-  'f': VISEMES.FF, 'F': VISEMES.FF,
-  'v': VISEMES.FF, 'V': VISEMES.FF,
-  's': VISEMES.SS, 'S': VISEMES.SS,
-  'z': VISEMES.SS, 'Z': VISEMES.SS,
-  'h': VISEMES.sil, 'H': VISEMES.sil,
-  // Affricates / postalveolars
-  'c': VISEMES.CH, 'C': VISEMES.CH, // will be refined by context
-  'j': VISEMES.CH, 'J': VISEMES.CH,
-  // Nasals
-  'm': VISEMES.PP, 'M': VISEMES.PP,
-  'n': VISEMES.nn, 'N': VISEMES.nn,
-  // Liquids
-  'l': VISEMES.nn, 'L': VISEMES.nn,
-  'r': VISEMES.RR, 'R': VISEMES.RR,
-  // Special
-  ' ': VISEMES.sil,
-  '\t': VISEMES.sil,
-  '\n': VISEMES.sil,
-  '.': VISEMES.sil,
-  ',': VISEMES.sil,
-  '?': VISEMES.sil,
-  '!': VISEMES.sil,
-  ';': VISEMES.sil,
-  ':': VISEMES.sil,
-  '-': VISEMES.sil,
-  '\'': VISEMES.sil,
-  '"': VISEMES.sil,
-  '(': VISEMES.sil,
-  ')': VISEMES.sil,
-};
-
-const DEFAULT_VISEME = VISEMES.aa;
-
-// Character-derived viseme duration weights for estimated speech timing.
-const PHONEME_WEIGHTS = {
-  [VISEMES.sil]: 1.4,
-  [VISEMES.aa]:  2.4,
-  [VISEMES.E]:   2.4,
-  [VISEMES.I]:   2.4,
-  [VISEMES.O]:   2.4,
-  [VISEMES.U]:   2.4,
-  [VISEMES.nn]:  1.6,
-  [VISEMES.RR]:  1.6,
-  [VISEMES.FF]:  1.2,
-  [VISEMES.SS]:  1.2,
-  [VISEMES.TH]:  1.2,
-  [VISEMES.CH]:  1.2,
-  [VISEMES.PP]:  0.6,
-  [VISEMES.DD]:  0.6,
-  [VISEMES.kk]:  0.6,
-};
-
-// Spring response constants used by the frame-rate-independent dampers.
-const SMOOTH_ATTACK_TAU  = 0.045;
-const SMOOTH_RELEASE_TAU = 0.110;
-const SMOOTH_SIL_TAU     = 0.150;
 const PLAYBACK_DECODE_TIMEOUT_MS = 15_000;
 const MAX_DECODE_AHEAD = 2;
 const MALE_VOICE_NAME_PATTERN = /\bmale\b/i;
-
-import { SpringDamper } from '../utils/springDamper.js';
 
 export class AudioLipSync {
   constructor() {
@@ -192,6 +63,8 @@ export class AudioLipSync {
     this._scheduleCursor = 0;
     this._dispatchingPlaybackError = false;
     this._resumePromise = null;
+    this._timingWorker = null;
+    this._timingWorkerFailed = false;
 
   }
 
@@ -223,35 +96,7 @@ export class AudioLipSync {
    * Build an estimated viseme timeline from text using weighted durations.
    */
   _buildTextTimeline(text) {
-    const clean = Array.from(text || '', (character) => {
-      const lower = character.toLowerCase();
-      if (CHAR_TO_VISEME[lower] || /\s/.test(lower)) return lower;
-      if (/[.,?!;:'"()-]/.test(lower)) return ' ';
-      return '*';
-    }).join('');
-    const items = [];
-    let idx = 0;
-    while (idx < clean.length) {
-      const ch = clean[idx];
-      if (ch === ' ') {
-        items.push({ viseme: VISEMES.sil, weight: PHONEME_WEIGHTS[VISEMES.sil] });
-        idx++;
-        while (idx < clean.length && clean[idx] === ' ') idx++;
-        continue;
-      }
-      const viseme = CHAR_TO_VISEME[ch] || DEFAULT_VISEME;
-      items.push({ viseme, weight: PHONEME_WEIGHTS[viseme] || 1.0 });
-      idx++;
-    }
-
-    const totalWeight = items.reduce((sum, item) => sum + item.weight, 0);
-    let currentAccum = 0;
-    return items.map(item => {
-      const startFrac = currentAccum / (totalWeight || 1);
-      currentAccum += item.weight;
-      const endFrac = currentAccum / (totalWeight || 1);
-      return { viseme: item.viseme, startFrac, endFrac };
-    });
+    return buildVisemeTimeline(text);
   }
 
   enqueue(audioBlob, sentenceText = '') {
@@ -274,7 +119,9 @@ export class AudioLipSync {
     item.final = false;
     item.scheduledDuration = 0;
     item.receivedDuration = 0;
-    item.estimatedDuration = Math.max(text.length * 0.065, 0.5);
+    item.textTimeline = this._buildTextTimeline(text);
+    item.estimatedDuration = Math.max(item.textTimeline.reduce((sum, unit) => sum + (unit.weight || 1), 0) * 0.085, 0.3);
+    item.timing = new SpeechTiming(sampleRate);
     item.progress = 0;
     item.startTime = null;
     item.endedDuration = 0;
@@ -293,6 +140,7 @@ export class AudioLipSync {
     if (!group || group.final) return false;
     if (text && !group.text) group.text = text;
 
+    group.timing.append(samples);
     const buffer = this._createPcmAudioBuffer(samples, group.sampleRate);
     group.chunks.push({
       buffer,
@@ -305,7 +153,7 @@ export class AudioLipSync {
       scheduled: false,
     });
     group.receivedDuration += buffer.duration;
-    if (final) group.final = true;
+    if (final) { group.final = true; this._alignSpeech(group); }
     this._requestQueuePump();
     return group.speechId;
   }
@@ -314,6 +162,7 @@ export class AudioLipSync {
     const item = this.queue.find((candidate) => candidate.kind === 'pcm' && candidate.speechId === speechId);
     if (!item) return false;
     item.final = true;
+    this._alignSpeech(item);
     if (item.chunks.every((chunk) => chunk.ended)) {
       if (this._activeAudioItem === item) this._activeAudioItem = null;
       if (this.currentSource && item.chunks.some((chunk) => chunk.source === this.currentSource)) {
@@ -376,87 +225,95 @@ export class AudioLipSync {
     return true;
   }
 
+  _outputTime() {
+    const context = this.audioContext;
+    if (!context) return 0;
+    const stamp = context.getOutputTimestamp?.();
+    if (stamp && stamp.performanceTime > 0 && Number.isFinite(stamp.contextTime)) {
+      const elapsed = (performance.now() - stamp.performanceTime) / 1000;
+      if (elapsed >= 0 && elapsed < 0.25) return Math.min(context.currentTime, Math.max(0, stamp.contextTime + elapsed));
+    }
+    return Math.max(0, context.currentTime - (context.baseLatency || 0) - (context.outputLatency || 0));
+  }
+
+  _alignSpeech(item) {
+    item.timing?.finish();
+    if (!item.timing || this._timingWorkerFailed || typeof Worker !== 'function') return;
+    try {
+      if (!this._timingWorker) {
+        this._timingWorker = new Worker(new URL('./speechTiming.worker.js', import.meta.url), { type: 'module' });
+        this._timingWorker.onmessage = ({ data }) => {
+          if (data.generation !== this._playbackGeneration) return;
+          const phrase = this.queue.find((candidate) => candidate.id === data.id);
+          if (phrase && data.timeline.length) phrase.alignedTimeline = data.timeline;
+        };
+        this._timingWorker.onerror = (event) => {
+          event.preventDefault?.();
+          console.warn('Speech timing worker unavailable; using estimated pronunciation timing.');
+          this._timingWorkerFailed = true;
+          this._timingWorker?.terminate();
+          this._timingWorker = null;
+        };
+      }
+      this._timingWorker.postMessage({ id: item.id, generation: this._playbackGeneration,
+        sampleRate: item.timing.sampleRate, frames: item.timing.frames,
+        samples: item.timing.samples, peak: item.timing.peak, timeline: item.textTimeline });
+    } catch (error) {
+      console.warn('Speech timing unavailable; using estimated pronunciation timing.', error);
+      this._timingWorkerFailed = true;
+      this._timingWorker?.terminate();
+      this._timingWorker = null;
+    }
+  }
+
+  _poseTimeline(item, duration) {
+    if (item?.alignedTimeline) return item.alignedTimeline;
+    const source = item?.textTimeline || this._textTimeline || [];
+    if (item?.poseDuration === duration) return item.poseTimeline;
+    const timeline = source.map((unit) => ({ ...unit, start: unit.startFrac * duration, end: unit.endFrac * duration }));
+    if (item) { item.poseDuration = duration; item.poseTimeline = timeline; }
+    return timeline;
+  }
+
+  _updateArticulation(timeline, seconds, rms, dt) {
+    const frame = articulationTargets(timeline, seconds, rms);
+    this.currentViseme = frame.viseme;
+    this.currentIntensity = frame.intensity;
+    const closing = (frame.weights.viseme_PP || 0) > 0.5;
+    for (const viseme of ALL_VISEME_KEYS) {
+      const target = frame.weights[viseme] || 0;
+      const current = this.visemeWeights[viseme] || 0;
+      const consonant = ['viseme_PP', 'viseme_FF', 'viseme_TH', 'viseme_DD', 'viseme_CH', 'viseme_SS'].includes(viseme);
+      const tau = closing ? (viseme === VISEMES.PP ? 0.018 : 0.015)
+        : target > current ? (consonant ? 0.028 : 0.045) : 0.055;
+      const damper = this.visemeDampers.get(viseme);
+      damper.updateParameters(tau, tau);
+      this.visemeWeights[viseme] = Math.max(0, Math.min(1, damper.update(target, dt)));
+    }
+    const total = ALL_VISEME_KEYS.reduce((sum, key) => sum + (key === VISEMES.sil ? 0 : this.visemeWeights[key]), 0);
+    if (total > 1) for (const key of ALL_VISEME_KEYS) if (key !== VISEMES.sil) this.visemeWeights[key] /= total;
+  }
+
   _analyzeFrame() {
     if (!this.analyser) return;
-
     const now = performance.now() / 1000;
     const dt = this._lastFrameClock ? Math.min(Math.max(now - this._lastFrameClock, 0), 0.1) : 0.016;
     this._lastFrameClock = now;
-
-    // Get current audio time
-    const audioTime = this.audioContext ? this.audioContext.currentTime - this._audioStartCtxTime : 0;
-    const progress = this._activeAudioItem?.kind === 'pcm' ? this._pcmProgress(this._activeAudioItem) : this._playbackDuration > 0
-      ? Math.min(Math.max(audioTime / this._playbackDuration, 0), 1)
-      : 0;
-
-    // Determine current viseme from the estimated text timeline.
-    let targetViseme = VISEMES.sil;
-    let intensity = 0;
-
-    if (this._textTimeline && this._textTimeline.length > 0) {
-      for (const item of this._textTimeline) {
-        if (progress >= item.startFrac && progress <= item.endFrac) {
-          targetViseme = item.viseme;
-          intensity = 1.0;
-          break;
-        }
-      }
-    }
-
-    // Waveform RMS measures audible energy. Averaging the whole frequency
-    // spectrum dilutes speech with empty bins and can suppress the mouth.
-    if (this.analyser && this._waveformData) {
+    const item = this._activeAudioItem;
+    const seconds = item?.kind === 'pcm' ? this._pcmTime(item) : this._outputTime() - this._audioStartCtxTime;
+    if (item?.kind === 'pcm') this._pcmProgress(item);
+    let rms = 0;
+    if (item?.timing) {
+      // Reading the received samples at the output position avoids the analyser
+      // window's additional lag and the browser's render-ahead audio clock.
+      rms = item.timing.rmsAt(seconds);
+    } else if (this._waveformData) {
       this.analyser.getFloatTimeDomainData(this._waveformData);
-      let sumSquares = 0;
-      for (const sample of this._waveformData) sumSquares += sample * sample;
-      const volume = Math.sqrt(sumSquares / this._waveformData.length);
-      intensity *= Math.min(volume * 6, 1);
+      let energy = 0;
+      for (const sample of this._waveformData) energy += sample * sample;
+      rms = Math.sqrt(energy / this._waveformData.length);
     }
-
-    // Update viseme
-    this.currentViseme = targetViseme;
-    this._fsmState = VISEME_CATEGORY[targetViseme] || FSM.silence;
-    this.currentIntensity = intensity;
-
-    // Build targets with coarticulation
-    const targets = {};
-    for (const v of ALL_VISEME_KEYS) targets[v] = 0;
-
-    if (targetViseme === VISEMES.sil || intensity < 0.04) {
-      targets[VISEMES.sil] = 1.0;
-    } else {
-      targets[targetViseme] = intensity;
-
-      // Coarticulation neighbors
-      const neighbors = COARTICULATION[targetViseme];
-      if (neighbors) {
-        for (const [nv, bf] of Object.entries(neighbors)) {
-          targets[nv] = Math.min(intensity * bf * 0.5, 0.12);
-        }
-      }
-    }
-
-    // Apply spring-damper smoothing
-    const isConsonant = this._fsmState === FSM.plosive || this._fsmState === FSM.fricative;
-    const attackTau = isConsonant ? SMOOTH_ATTACK_TAU : SMOOTH_ATTACK_TAU * 1.4;
-    const releaseTau = targetViseme === VISEMES.sil ? SMOOTH_SIL_TAU : (isConsonant ? SMOOTH_RELEASE_TAU : SMOOTH_RELEASE_TAU * 1.4);
-
-    for (const v of ALL_VISEME_KEYS) {
-      const target = targets[v] || 0;
-      const current = this.visemeWeights[v] || 0;
-      const baseTau = target > current ? attackTau : releaseTau;
-
-      let damper = this.visemeDampers.get(v);
-      if (!damper) {
-        damper = new SpringDamper(current, baseTau, v);
-        this.visemeDampers.set(v, damper);
-      } else {
-        damper.updateParameters(baseTau, v);
-      }
-
-      this.visemeWeights[v] = damper.update(target, dt);
-    }
-
+    this._updateArticulation(this._poseTimeline(item, this._playbackDuration || 1), seconds, rms, dt);
   }
 
   _pumpQueue() {
@@ -656,18 +513,20 @@ export class AudioLipSync {
     }
   }
 
-  _pcmProgress(item) {
-    const ctx = this.audioContext;
-    const audibleTime = ctx.currentTime - (ctx.baseLatency || 0) - (ctx.outputLatency || 0);
-    let elapsed = item.endedDuration;
+  _pcmTime(item) {
+    const audibleTime = this._outputTime();
+    let elapsed = 0;
     for (const chunk of item.chunks) {
       if (chunk.scheduled && audibleTime >= chunk.startTime) {
         elapsed = Math.max(elapsed, chunk.offset + Math.min(audibleTime - chunk.startTime, chunk.duration));
       }
     }
+    return elapsed;
+  }
+
+  _pcmProgress(item) {
+    const elapsed = this._pcmTime(item);
     this._playbackDuration = item.final ? item.receivedDuration : Math.max(item.estimatedDuration, elapsed + 0.3);
-    // Sample offsets exclude network stalls. Never rewind when the final
-    // duration replaces the estimate or more audio arrives.
     item.progress = Math.min(Math.max(item.progress, elapsed / Math.max(this._playbackDuration, 0.1)), item.final ? 1 : 0.97);
     return item.progress;
   }
@@ -679,14 +538,12 @@ export class AudioLipSync {
     item.state = 'playing';
     this._activeAudioItem = item;
     this.currentSource = chunk.source;
-    this._textTimeline = this._buildTextTimeline(item.text);
+    item.textTimeline ||= this._buildTextTimeline(item.text);
+    this._textTimeline = item.textTimeline;
     this._playbackDuration = item.final ? item.receivedDuration : item.estimatedDuration;
     this._lastFrameClock = 0;
 
-    const ctx = this.audioContext;
-    const baseLatency = Number.isFinite(ctx.baseLatency) ? ctx.baseLatency : 0;
-    const outputLatency = (ctx.outputLatency && Number.isFinite(ctx.outputLatency)) ? ctx.outputLatency : 0;
-    this._audioStartCtxTime = item.startTime + baseLatency + outputLatency;
+    this._audioStartCtxTime = item.startTime;
 
     this.onPlaybackStart?.(item.text);
     this._ensureAudioAnalysisLoop();
@@ -738,14 +595,12 @@ export class AudioLipSync {
     item.state = 'playing';
     this._activeAudioItem = item;
     this.currentSource = item.source;
-    this._textTimeline = this._buildTextTimeline(item.text);
+    item.textTimeline ||= this._buildTextTimeline(item.text);
+    this._textTimeline = item.textTimeline;
     this._playbackDuration = item.duration || 1;
     this._lastFrameClock = 0;
 
-    const ctx = this.audioContext;
-    const baseLatency = Number.isFinite(ctx.baseLatency) ? ctx.baseLatency : 0;
-    const outputLatency = (ctx.outputLatency && Number.isFinite(ctx.outputLatency)) ? ctx.outputLatency : 0;
-    this._audioStartCtxTime = item.startTime + baseLatency + outputLatency;
+    this._audioStartCtxTime = item.startTime;
 
     if (!item.playbackStarted) {
       item.playbackStarted = true;
@@ -899,6 +754,9 @@ export class AudioLipSync {
 
   dispose() {
     this.stop();
+    this._timingWorker?.terminate();
+    this._timingWorker = null;
+    this._timingWorkerFailed = false;
 
     const context = this.audioContext;
     const ownsAudioContext = this._ownsAudioContext;
@@ -1008,52 +866,15 @@ export class AudioLipSync {
       this._fallbackProgress += dt / Math.max(totalDurationEstimate, 0.1);
       const progress = Math.min(this._fallbackProgress, 0.9999);
 
-      const timeline = this._textTimeline;
-      let viseme = VISEMES.sil;
-      if (timeline) {
-        for (const item of timeline) {
-          if (progress >= item.startFrac && progress <= item.endFrac) { viseme = item.viseme; break; }
-        }
-      }
-      const volume = 0.6 + 0.3 * Math.sin(Math.min(progress * Math.PI * 8, Math.PI * 2));
-
-      const targets = {};
-      for (const v of ALL_VISEME_KEYS) targets[v] = 0;
-      if (viseme !== VISEMES.sil) {
-        targets[viseme] = Math.min(volume * 0.85, 1.0);
-        const neighbors = COARTICULATION[viseme];
-        if (neighbors) {
-          for (const [nv, bf] of Object.entries(neighbors)) {
-            targets[nv] = volume * bf * 0.45;
-          }
-        }
-      } else {
-        targets[VISEMES.sil] = 1.0;
-      }
-
-      const isConsonant = VISEME_CATEGORY[viseme] === FSM.plosive || VISEME_CATEGORY[viseme] === FSM.fricative;
-      const attackTau = isConsonant ? SMOOTH_ATTACK_TAU : SMOOTH_ATTACK_TAU * 1.4;
-      const releaseTau = viseme === VISEMES.sil ? SMOOTH_SIL_TAU : (isConsonant ? SMOOTH_RELEASE_TAU : SMOOTH_RELEASE_TAU * 1.4);
-
-      for (const v of ALL_VISEME_KEYS) {
-        const target = targets[v] || 0;
-        const current = this.visemeWeights[v] || 0;
-        const baseTau = target > current ? attackTau : releaseTau;
-
-        let damper = this.visemeDampers.get(v);
-        if (!damper) {
-          damper = new SpringDamper(current, baseTau, v);
-          this.visemeDampers.set(v, damper);
-        } else {
-          damper.updateParameters(baseTau, v);
-        }
-
-        this.visemeWeights[v] = damper.update(target, dt);
-      }
-
-      this.currentViseme = viseme;
-      this.currentIntensity = volume;
+      this._updateArticulation(this._poseTimeline(null, totalDurationEstimate), progress * totalDurationEstimate, 0.08, dt);
       this._fallbackRAF = requestAnimationFrame(tick);
+    };
+
+    utterance.onboundary = (event) => {
+      if (generation !== this._speechGeneration || this._activeUtterance !== utterance || event.name !== 'word') return;
+      const unit = this._textTimeline?.find((entry) => entry.charStart <= event.charIndex && entry.charEnd > event.charIndex);
+      if (unit) this._fallbackProgress = unit.startFrac;
+      this._fallbackLastClock = performance.now() / 1000;
     };
 
     utterance.onstart = () => {

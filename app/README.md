@@ -17,7 +17,7 @@ Open [http://localhost:5173](http://localhost:5173). The Vite client proxies `/a
 
 The page rechecks service availability after startup, so it recovers when the API comes online without a reload. A failed or cancelled text request keeps the question in the input for another attempt. **Retry** on a failed message resends its text, including a voice transcript, without recording again or losing a different draft. Failure details remain with that message. Use **Cancel request** while waiting for transcription, chat, or speech, and **Stop speaking** during playback. **New chat** clears the transcript and draft and cancels pending requests and microphone access without restarting the avatar. Cancelled and failed turns are excluded from subsequent AI context. Microphone permission requests can be cancelled from the microphone control.
 
-One `NVIDIA_API_KEY` powers chat, Parakeet transcription, and Magpie speech. Chat has a 60-second provider deadline and a 75-second browser deadline to allow for hosted-provider delays; speech endpoints use 30-second provider and 45-second browser deadlines. These include response streaming. Microphone capture stops after 60 seconds, and audio decoding and conversion each have a 15-second deadline. Cancelling a request also cancels conversion and upstream work. If the speech service fails, the app tries browser speech only when it can identify an English male voice; otherwise the text reply remains visible. Mouth movement follows a text-timed estimate shaped by audio volume, so it is expressive rather than phoneme-accurate.
+One `NVIDIA_API_KEY` powers chat, Parakeet transcription, and Magpie speech. Chat has a 60-second provider deadline and a 75-second browser deadline to allow for hosted-provider delays; speech endpoints use 30-second provider and 45-second browser deadlines. These include response streaming. Microphone capture stops after 60 seconds, and audio decoding and conversion each have a 15-second deadline. Cancelling a request also cancels conversion and upstream work. If the speech service fails, the app tries browser speech only when it can identify an English male voice; otherwise the text reply remains visible. Mouth movement uses pronunciation-based sound shapes, waveform timing cues and the actual audio output clock. It remains estimated rather than phoneme-perfect; see the [articulation measurements](../docs/mouth-articulation.md).
 
 ## Build and serve
 
@@ -77,6 +77,7 @@ npm run build
 PLAYWRIGHT_MODULE=/absolute/path/to/playwright/index.mjs npm run test:e2e
 # Check rendered mouth movement and idle animation continuity:
 PLAYWRIGHT_MODULE=/absolute/path/to/playwright/index.mjs npm run test:avatar
+PLAYWRIGHT_MODULE=/absolute/path/to/playwright/index.mjs npm run test:articulation
 PLAYWRIGHT_MODULE=/absolute/path/to/playwright/index.mjs npm run test:streaming
 PLAYWRIGHT_MODULE=/absolute/path/to/playwright/index.mjs npm run test:pages
 ```

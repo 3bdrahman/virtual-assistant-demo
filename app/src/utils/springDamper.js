@@ -29,9 +29,9 @@ export class SpringDamper {
     return this.position;
   }
 
-  updateParameters(tau) {
+  updateParameters(tau, releaseTau) {
     this.tau = Number.isFinite(tau) ? Math.max(tau, 0.001) : 0.05;
-    this.releaseTau = Math.max(this.tau, 0.045);
+    this.releaseTau = Number.isFinite(releaseTau) ? Math.max(releaseTau, 0.001) : Math.max(this.tau, 0.045);
   }
 
   reset(position = 0, velocity = 0) {
