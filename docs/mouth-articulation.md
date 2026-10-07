@@ -91,6 +91,13 @@ sample does not carry reference phoneme labels and cannot establish exact sync.
   repeated replies, and idle-animation continuity.
 - All four Pages browser scenarios passed, including visitor-key isolation,
   cancellation, and the `/demo/` asset base path.
+- The release audit required updating the existing transitive `proxy-addr`
+  dependency from 2.0.7 to the patched 2.0.8 for
+  [GHSA-jqcg-44mw-7w3h](https://github.com/jshttp/proxy-addr/security/advisories/GHSA-jqcg-44mw-7w3h).
+  No new dependency was added.
+- Production dependency audit passes. Existing development-only advisories in
+  `concurrently`/`shell-quote` and `source-map-js` are outside this articulation
+  change; the deployment's production audit gate remains enabled.
 - `npm run test:articulation` renders and checks actual model morphs. Set
   `LIPSYNC_BASELINE_MODULE` to the old `audioLipSync.js` for before/after comparison;
   `LIPSYNC_VOICE_SAMPLE` can supply the documented utterance recorded with Jason.
