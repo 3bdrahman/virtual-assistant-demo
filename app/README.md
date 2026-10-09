@@ -2,6 +2,8 @@
 
 A live AI conversation with a 3D avatar. Type a question or record your voice; replies stream into the transcript and the avatar speaks them aloud. Responses come from the live provider, with Jason as the primary voice. In visitor-key mode, each visitor enters a NVIDIA key that is kept only in page memory.
 
+[Open the live demo](https://3bdrahman.github.io/virtual-assistant-demo/) · [Watch the silent real-provider walkthrough](../docs/showcase/demo.webm) · [View the live conversation screenshot](../docs/showcase/live-conversation.png)
+
 ## Run locally
 
 Requirements: Node.js 22+ and a server-side NVIDIA API key. WebGL is used for the avatar; text chat remains available when WebGL is blocked.
@@ -16,6 +18,8 @@ npm run dev
 Open [http://localhost:5173](http://localhost:5173). The Vite client proxies `/api` to the Express server on port 3011. `.env` is ignored by Git and must stay on the server.
 
 The page rechecks service availability after startup, so it recovers when the API comes online without a reload. A failed or cancelled text request keeps the question in the input for another attempt. **Retry** on a failed message resends its text, including a voice transcript, without recording again or losing a different draft. Failure details remain with that message. Use **Cancel request** while waiting for transcription, chat, or speech, and **Stop speaking** during playback. **New chat** clears the transcript and draft and cancels pending requests and microphone access without restarting the avatar. Cancelled and failed turns are excluded from subsequent AI context. Microphone permission requests can be cancelled from the microphone control.
+
+In visitor-key mode, a key is labeled as added until a provider request proves it works. If the provider rejects it, the key panel opens, the controls pause, and the failed prompt is restored as a draft after a replacement key is entered. Changing or removing a valid key starts a new chat.
 
 One `NVIDIA_API_KEY` powers chat, Parakeet transcription, and Magpie speech. Chat has a 60-second provider deadline and a 75-second browser deadline to allow for hosted-provider delays; speech endpoints use 30-second provider and 45-second browser deadlines. These include response streaming. Microphone capture stops after 60 seconds, and audio decoding and conversion each have a 15-second deadline. Cancelling a request also cancels conversion and upstream work. If the speech service fails, the app tries browser speech only when it can identify an English male voice; otherwise the text reply remains visible. Mouth movement uses pronunciation-based sound shapes, waveform timing cues and the actual audio output clock. It remains estimated rather than phoneme-perfect; see the [articulation measurements](../docs/mouth-articulation.md).
 
@@ -49,7 +53,7 @@ The server listens on the host's `PORT` and `0.0.0.0`; the public URL serves bot
 | Path | Provider | Credential |
 | --- | --- | --- |
 | Text chat | NVIDIA NIM hosted Chat Completions, streamed SSE | `NVIDIA_API_KEY` |
-| Microphone transcription | NVIDIA hosted Parakeet CTC ASR | `NVIDIA_API_KEY` |
+| Microphone transcription after recording stops | NVIDIA hosted Parakeet CTC ASR | `NVIDIA_API_KEY` |
 | Avatar speech | NVIDIA hosted Magpie TTS, streamed PCM playback | `NVIDIA_API_KEY` |
 | Speech fallback | Browser Web Speech API | No extra key |
 
@@ -92,7 +96,7 @@ npm run test:live
 
 The explicit `npm run test:public` check takes `DEMO_PAGE_URL`, `DEMO_API_URL`, and a visitor `NVIDIA_API_KEY`, plus the Playwright/browser paths used by the other browser tests. It uses real provider quota to verify the deployed frontend, audio playback, GPU mouth movement, microphone flow, and key clearing. It records any provider failure and tries the visible Retry control once; it fails if that retry also fails.
 
-This makes three short real provider calls: chat → synthesized speech → transcription of that speech. It prints pass/fail metadata without credentials, prompts, or audio content. Run it only when you intend to use provider quota. Physical microphone/speaker quality and the deployed HTTPS origin still need checks on the intended demo devices.
+This makes a small number of real chat, speech, and transcription requests; early phrase chunking can make more than one speech request. It prints pass/fail metadata without credentials, prompts, or audio content. Run it only when you intend to use provider quota. Physical microphone/speaker quality on the intended demo devices remains a separate check.
 
 ## Project layout
 

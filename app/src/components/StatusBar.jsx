@@ -8,12 +8,14 @@ const STAGES = {
 };
 
 export function StatusBar({ connection, pipelineStage, errorMessage, speechMode, onManageKey }) {
-  const ready = connection.online && (connection.requiresUserKey ? connection.hasUserKey : connection.hasNvidiaKey);
+  const ready = connection.online && (connection.requiresUserKey ? connection.hasUserKey && !connection.keyRejected : connection.hasNvidiaKey);
   const connectionLabel = !connection.checked
     ? 'Checking services'
     : !connection.online
       ? 'Demo offline'
-      : ready ? 'Live AI configured' : connection.requiresUserKey ? 'API key needed' : 'Live AI unavailable';
+      : connection.requiresUserKey
+        ? connection.keyRejected ? 'API key rejected' : connection.hasUserKey ? 'API key added' : 'API key needed'
+        : ready ? 'Live AI configured' : 'Live AI unavailable';
 
   return (
     <header className="status-bar" id="status-bar">

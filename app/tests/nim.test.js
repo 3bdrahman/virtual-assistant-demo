@@ -308,6 +308,27 @@ test('streamed speech yields PCM before the response finishes and handles split 
   } finally { globalThis.fetch = originalFetch; }
 });
 
+test('completed PCM speech does not cancel its finished network reader', async () => {
+  const originalFetch = globalThis.fetch;
+  let cancelled = 0;
+  let reads = 0;
+  globalThis.fetch = async () => ({
+    ok: true,
+    headers: new Headers({ 'Content-Type': 'audio/pcm;rate=44100;channels=1' }),
+    body: { getReader: () => ({
+      read: async () => ++reads === 1 ? { done: false, value: Uint8Array.of(1, 0) } : { done: true },
+      cancel: async () => { cancelled++; },
+      releaseLock() {},
+    }) },
+  });
+  try {
+    const chunks = [];
+    assert.equal((await streamSynthesize('Hi', { onChunk: (chunk) => chunks.push(chunk) })).sampleCount, 1);
+    assert.equal(chunks.length, 1);
+    assert.equal(cancelled, 0);
+  } finally { globalThis.fetch = originalFetch; }
+});
+
 test('streamed speech rejects empty, truncated, or unexpected audio and cancels the reader', async () => {
   const originalFetch = globalThis.fetch;
   try {

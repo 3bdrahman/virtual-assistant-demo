@@ -470,14 +470,17 @@ async function main() {
       try {
         await gotoSetup(first.page, frontendOrigin);
         await saveKey(first.page, BAD_KEY);
+        await expectText(first.page.locator('#status-bar'), 'API key added');
         await submitText(first.page, 'bad key request');
-        await expectText(first.page.locator('#status-bar'), /visitor key|check your key|rejected/i);
+        await expectText(first.page.locator('#status-bar'), 'API key rejected');
+        assert.equal(await first.page.getByRole('textbox', { name: 'Message' }).isDisabled(), true);
         assert.equal(provider.snapshot().calls.at(-1)?.authorization, `Bearer ${BAD_KEY}`);
 
         if (!await first.page.getByLabel('NVIDIA API key', { exact: true }).isVisible()) await first.page.getByRole('button', { name: 'Change API key' }).click();
         await saveKey(first.page, GOOD_KEY);
-        await submitText(first.page, 'recovered request');
-        await waitForAssistant(first.page, /recovered request/);
+        assert.equal(await first.page.getByRole('textbox', { name: 'Message' }).inputValue(), 'bad key request');
+        await first.page.getByRole('button', { name: 'Send message' }).click();
+        await waitForAssistant(first.page, /bad key request/);
         assert.equal(provider.snapshot().calls.filter((call) => call.authorization === `Bearer ${GOOD_KEY}`).length >= 2, true);
 
         await gotoSetup(second.page, frontendOrigin);

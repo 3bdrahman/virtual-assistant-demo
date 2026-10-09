@@ -1,6 +1,6 @@
 # GitHub Pages demo with visitor keys
 
-The demo is live at **https://3bdrahman.github.io/virtual-assistant-demo/**, with its API at **https://virtual-assistant-pages-api.onrender.com/api**. The deployed conversation flow passed the real-provider browser check on September 29, 2026; see [public verification](public-demo-evidence/public-result.json).
+The demo is live at **https://3bdrahman.github.io/virtual-assistant-demo/**, with its API at **https://virtual-assistant-pages-api.onrender.com/api**. See the [showcase screenshots and silent walkthrough](../README.md) for the current experience. The explicit real-provider browser check is described below.
 
 Each visitor supplies a NVIDIA key; it stays in page memory, is sent in an Authorization header to the API relay, and is forwarded to the fixed NVIDIA endpoints. Reloading clears it. Changing or removing it also starts a new conversation. The Render free instance can need about a minute to wake; the page reconnects automatically.
 
@@ -58,6 +58,6 @@ PLAYWRIGHT_MODULE=/path/to/playwright/index.mjs npm run test:avatar
 
 The explicit `npm run test:live` command makes real NVIDIA calls. The primary voice is Jason. Browser speech fallback is used only when an available English voice is explicitly labelled male; otherwise the text remains available.
 
-The public check verified real chat and Jason speech, GPU mouth movement, stop/reset, microphone transcription of a generated speech fixture, a second reply, new-chat clearing, no persisted key, and key removal on reload. All requests succeeded in the final run, with no browser errors or retries. Physical microphone/speaker quality and other browser engines remain device-specific checks.
+An earlier public check verified real chat and Jason speech, GPU mouth movement, stop/reset, microphone transcription of a generated speech fixture, a second reply, new-chat clearing, no persisted key, and key removal on reload. Its recorded run had no browser errors or retries. Physical microphone/speaker quality and other browser engines remain device-specific checks.
 
-The release now has 102 passing automated tests. A hosted-provider timeout found during the public check led to a longer bounded chat response window, persistent failure details, and a Retry button that also reuses recorded transcripts. Deployment IDs and final measurements are in [release evidence](public-demo-evidence/verification-summary.json).
+The October 2026 release candidate has 162 passing unit/API tests plus controlled Pages, streaming, avatar, articulation, and conversation browser checks. A hosted-provider timeout found during an earlier public check led to a longer bounded chat response window, persistent failure details, and a Retry button that also reuses recorded transcripts. Earlier deployment evidence is in [release evidence](public-demo-evidence/verification-summary.json); run `test:public` against each new deployment rather than treating that result as current.

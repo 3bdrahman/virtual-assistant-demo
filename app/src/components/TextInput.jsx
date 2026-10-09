@@ -4,8 +4,8 @@
 
 import { useState, useCallback, useEffect, useRef } from 'react';
 
-export function TextInput({ onSubmit, sentMessage, describedBy, disabled }) {
-  const [text, setText] = useState('');
+export function TextInput({ initialText = '', onSubmit, sentMessage, describedBy, disabled }) {
+  const [text, setText] = useState(initialText);
   const composingRef = useRef(false);
 
   // The parent commit is the only clear signal; late submit promises must not

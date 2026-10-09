@@ -240,6 +240,7 @@ async function newPage(browser, origin, {
   const context = await browser.newContext({ viewport, baseURL: origin });
   if (!denyMic) await context.grantPermissions(['microphone'], { origin });
   const diagnostics = { pageErrors: [], consoleErrors: [], failedRequests: [], completedOrCancelledStreams: [] };
+  const acceptedTtsResponses = new WeakSet();
   if (offlineHealth) {
     await context.route('**/api/health', (route) => route.abort('failed'));
   }
@@ -267,12 +268,21 @@ async function newPage(browser, origin, {
       diagnostics.consoleErrors.push(text);
     }
   });
+  page.on('response', (response) => {
+    if (response.url().endsWith('/api/tts') && response.status() === 200) acceptedTtsResponses.add(response.request());
+  });
   page.on('requestfailed', (request) => {
     const url = request.url();
     const failure = `${request.method()} ${url}: ${request.failure()?.errorText || 'failed'}`;
     // The client releases SSE immediately on DONE as well as explicit Cancel.
     // Each scenario separately asserts a committed reply or a cancellation label.
     if (url.endsWith('/api/chat') && request.failure()?.errorText === 'net::ERR_ABORTED') {
+      diagnostics.completedOrCancelledStreams.push(failure);
+      return;
+    }
+    // Chromium can report an already accepted PCM response as aborted when its
+    // completed stream closes. A truncated stream still triggers an app error.
+    if (url.endsWith('/api/tts') && request.failure()?.errorText === 'net::ERR_ABORTED' && acceptedTtsResponses.has(request)) {
       diagnostics.completedOrCancelledStreams.push(failure);
       return;
     }

@@ -180,12 +180,13 @@ export async function streamSynthesize(text, { onChunk, apiKey, ...options } = {
     let lowByte = null;
     let sampleCount = 0;
     let bytesRead = 0;
+    let completed = false;
     try {
       while (true) {
         signal.throwIfAborted();
         const { done, value } = await reader.read();
         signal.throwIfAborted();
-        if (done) break;
+        if (done) { completed = true; break; }
         bytesRead += value.length;
         if (bytesRead > 15 * 1024 * 1024) throw new Error('Speech audio was too large.');
         for (const byte of value) {
@@ -210,7 +211,7 @@ export async function streamSynthesize(text, { onChunk, apiKey, ...options } = {
       return { sampleRate: 44100, sampleCount };
     } finally {
       signal.removeEventListener('abort', cancel);
-      cancel();
+      if (!completed) cancel();
       reader.releaseLock();
     }
   });

@@ -1,6 +1,6 @@
 import { useState } from 'react';
 
-export function ApiKeyPanel({ hasKey, relayOrigin, onSave, onRemove }) {
+export function ApiKeyPanel({ hasKey, rejected, relayOrigin, onSave, onRemove }) {
   const [value, setValue] = useState('');
   const [error, setError] = useState('');
 
@@ -20,6 +20,7 @@ export function ApiKeyPanel({ hasKey, relayOrigin, onSave, onRemove }) {
     <section className="api-key-panel" aria-labelledby="api-key-heading">
       <h2 id="api-key-heading">{hasKey ? 'Change your NVIDIA API key' : 'Add your NVIDIA API key'}</h2>
       <p id="api-key-notice">Your key stays in this page’s memory and is cleared on reload. Requests go through {relayOrigin} to NVIDIA and use your NVIDIA quota.</p>
+      {rejected && <p role="alert" className="key-error">That key was rejected. Enter a new key; your failed message will be ready to resend.</p>}
       {hasKey && <p>Changing or removing the key starts a new chat.</p>}
       <form onSubmit={submit}>
         <label htmlFor="visitor-api-key">NVIDIA API key</label>

@@ -54,6 +54,8 @@ function App() {
   const [connection, setConnection] = useState({ checked: false, online: false, hasNvidiaKey: false });
   const [speechMode, setSpeechMode] = useState('');
   const [apiKey, setApiKey] = useState('');
+  const [keyRejected, setKeyRejected] = useState(false);
+  const [recoveryDraft, setRecoveryDraft] = useState('');
   const apiKeyRef = useRef('');
   const [keyPanelOpen, setKeyPanelOpen] = useState(false);
   const [conversationId, setConversationId] = useState(0);
@@ -135,17 +137,22 @@ function App() {
     messagesRef.current = [];
     setMessages([]);
     setSpeechMode('');
+    setRecoveryDraft('');
     // Remount input controls to discard drafts and cancel late mic permission
     // results; the avatar keeps its existing animation instance.
     setConversationId((current) => current + 1);
   }, [cancelRequest]);
 
   const saveApiKey = useCallback((key) => {
+    const lastMessage = messagesRef.current.at(-1);
+    const retryDraft = key && keyRejected && lastMessage?.failed ? lastMessage.content : '';
     newConversation();
+    setRecoveryDraft(retryDraft);
     apiKeyRef.current = key;
     setApiKey(key);
+    setKeyRejected(false);
     setKeyPanelOpen(false);
-  }, [newConversation]);
+  }, [keyRejected, newConversation]);
 
   const processInput = useCallback(async (userText, existingRequest = null) => {
     const text = userText.trim();
@@ -234,7 +241,10 @@ function App() {
       if (!isCurrent()) return replyCommitted;
       controller.abort();
       lipSync.stop();
-      if (error.status === 401 && requestKey) setKeyPanelOpen(true);
+      if (error.status === 401 && requestKey) {
+        setKeyRejected(true);
+        setKeyPanelOpen(true);
+      }
       if (!replyCommitted) {
         messagesRef.current = messagesRef.current.map((message) => (
           message === userMessage ? { ...message, failed: true, error: error.message || 'The request failed. Please retry.' } : message
@@ -273,7 +283,10 @@ function App() {
       await processInput(transcript, controller);
     } catch (error) {
       if (requestRef.current !== controller || controller.signal.aborted) return;
-      if (error.status === 401 && apiKeyRef.current) setKeyPanelOpen(true);
+      if (error.status === 401 && apiKeyRef.current) {
+        setKeyRejected(true);
+        setKeyPanelOpen(true);
+      }
       showError(error.message || 'Transcription failed. Please try again.');
     } finally {
       if (requestRef.current === controller) requestRef.current = null;
@@ -281,8 +294,8 @@ function App() {
   }, [processInput, showError]);
 
   const visitorKeys = REQUIRES_USER_KEY || connection.requiresUserKey;
-  const keyPanelVisible = visitorKeys && (!apiKey || keyPanelOpen);
-  const ready = connection.online && (visitorKeys ? Boolean(apiKey) : connection.hasNvidiaKey);
+  const keyPanelVisible = visitorKeys && (!apiKey || keyPanelOpen || keyRejected);
+  const ready = connection.online && (visitorKeys ? Boolean(apiKey) && !keyRejected : connection.hasNvidiaKey);
   const setupNoticeVisible = connection.checked && (!connection.online || (!visitorKeys && !connection.hasNvidiaKey));
   const controlDescription = setupNoticeVisible ? 'setup-notice' : keyPanelVisible ? 'api-key-notice' : undefined;
   const isBusy = isResponding || stage === 'starting' || stage === 'recording' || stage === 'transcribing' || stage === 'thinking' || stage === 'synthesizing';
@@ -300,7 +313,7 @@ function App() {
       </div>
 
       <div className={`ui-overlay${keyPanelVisible ? ' key-setup' : ''}`}>
-        <StatusBar connection={{ ...connection, requiresUserKey: visitorKeys, hasUserKey: Boolean(apiKey) }} pipelineStage={stage} errorMessage={errorMessage} speechMode={speechMode} onManageKey={() => {
+        <StatusBar connection={{ ...connection, requiresUserKey: visitorKeys, hasUserKey: Boolean(apiKey), keyRejected }} pipelineStage={stage} errorMessage={errorMessage} speechMode={speechMode} onManageKey={() => {
           if (!keyPanelOpen) {
             cancelRequest();
             setConversationId((current) => current + 1);
@@ -319,7 +332,7 @@ function App() {
           <h1>Conversation, brought to life.</h1>
           <p>Speak or type to a live AI. Watch the avatar respond with voice and expression.</p>
           {!setupNoticeVisible && sceneState !== 'ready' && <SceneStatus loading={sceneState === 'loading'} />}
-          {keyPanelVisible && <ApiKeyPanel hasKey={Boolean(apiKey)} relayOrigin={apiRelayOrigin()} onSave={saveApiKey} onRemove={() => saveApiKey('')} />}
+          {keyPanelVisible && <ApiKeyPanel hasKey={Boolean(apiKey)} rejected={keyRejected} relayOrigin={apiRelayOrigin()} onSave={saveApiKey} onRemove={() => saveApiKey('')} />}
           {!keyPanelVisible && <div className="prompt-list" aria-label="Try a prompt">
             {['Explain black holes simply', 'Tell me a short story', 'Give me a creative idea'].map((prompt) => (
               <button key={prompt} type="button" onClick={() => processInput(prompt)} disabled={!ready || isBusy}>
@@ -351,7 +364,7 @@ function App() {
               describedBy={controlDescription}
               disabled={!ready || keyPanelVisible || (isBusy && stage !== 'starting' && stage !== 'recording')}
             />
-            <TextInput onSubmit={processInput} sentMessage={sentMessage} describedBy={controlDescription} disabled={!ready || isBusy || keyPanelVisible} />
+            <TextInput initialText={recoveryDraft} onSubmit={processInput} sentMessage={sentMessage} describedBy={controlDescription} disabled={!ready || isBusy || keyPanelVisible} />
           </div>
         </div>
       </div>
