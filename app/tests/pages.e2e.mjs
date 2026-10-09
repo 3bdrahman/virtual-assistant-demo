@@ -11,6 +11,7 @@ import { createApp } from '../server/index.js';
 const DEFAULT_TIMEOUT_MS = 15_000;
 const BUILD_TIMEOUT_MS = 90_000;
 const FRONTEND_BASE = '/demo/';
+const BROWSER_NAME = process.env.E2E_BROWSER || 'chromium';
 const GOOD_KEY = 'nv-good-key';
 const SECOND_KEY = 'nv-second-key';
 const BAD_KEY = 'nv-bad-key';
@@ -272,7 +273,9 @@ function escapeRegExp(value) {
 }
 
 async function createBrowser(playwright) {
-  return playwright.chromium.launch({
+  assert.ok(['chromium', 'firefox', 'webkit'].includes(BROWSER_NAME), `Unsupported E2E_BROWSER: ${BROWSER_NAME}`);
+  const browserType = playwright[BROWSER_NAME];
+  return browserType.launch(BROWSER_NAME === 'chromium' ? {
     headless: true,
     executablePath: process.env.CHROMIUM_EXECUTABLE_PATH || undefined,
     args: [
@@ -282,12 +285,12 @@ async function createBrowser(playwright) {
       '--use-fake-ui-for-media-stream',
       '--use-fake-device-for-media-stream',
     ],
-  });
+  } : { headless: true });
 }
 
 async function newPage(browser, frontendOrigin, { noWebGL = true } = {}) {
   const context = await browser.newContext({ viewport: { width: 1280, height: 800 }, baseURL: frontendOrigin });
-  await context.grantPermissions(['microphone'], { origin: frontendOrigin });
+  if (BROWSER_NAME === 'chromium') await context.grantPermissions(['microphone'], { origin: frontendOrigin });
   const diagnostics = { pageErrors: [], consoleErrors: [], failedRequests: [], completedAssets: [] };
   const page = await context.newPage();
   page.setDefaultTimeout(DEFAULT_TIMEOUT_MS);
@@ -305,7 +308,9 @@ async function newPage(browser, frontendOrigin, { noWebGL = true } = {}) {
     if (message.type() === 'error') diagnostics.consoleErrors.push(message.text());
   });
   page.on('requestfailed', (request) => {
-    if (request.url().includes('/api/chat') && request.failure()?.errorText === 'net::ERR_ABORTED') return;
+    const failure = request.failure()?.errorText;
+    if (request.url().includes('/api/chat') && ['net::ERR_ABORTED', 'NS_BINDING_ABORTED'].includes(failure)) return;
+    if (BROWSER_NAME === 'firefox' && request.url().startsWith('https://fonts.gstatic.com/') && failure === 'NS_BINDING_ABORTED') return;
     diagnostics.failedRequests.push(`${request.method()} ${request.url()}: ${request.failure()?.errorText || 'failed'}`);
   });
   page.on('requestfinished', (request) => {
@@ -461,6 +466,56 @@ async function main() {
       } finally {
         await context.close();
       }
+    }, artifacts);
+
+    await runScenario(results, 'recorded microphone and PCM playback work with browser media APIs', async () => {
+      provider.reset('success');
+      const { context, page, diagnostics } = await newPage(browser, frontendOrigin);
+      try {
+        await page.addInitScript(({ forceMp4 }) => {
+          window.__mediaProbe = { sourcesStarted: 0 };
+          if (forceMp4) {
+            const supported = MediaRecorder.isTypeSupported.bind(MediaRecorder);
+            if (!supported('audio/mp4')) throw new Error('The browser cannot record MP4 audio for this check.');
+            MediaRecorder.isTypeSupported = (type) => type === 'audio/mp4' && supported(type);
+          }
+          const AudioContextType = window.AudioContext || window.webkitAudioContext;
+          const createBufferSource = AudioContextType.prototype.createBufferSource;
+          AudioContextType.prototype.createBufferSource = function (...args) {
+            const source = createBufferSource.apply(this, args);
+            const start = source.start;
+            source.start = function (...startArgs) {
+              window.__mediaProbe.sourcesStarted++;
+              return start.apply(this, startArgs);
+            };
+            return source;
+          };
+          navigator.mediaDevices.getUserMedia = async () => {
+            const audio = new AudioContextType();
+            const output = audio.createMediaStreamDestination();
+            const oscillator = audio.createOscillator();
+            oscillator.connect(output);
+            oscillator.start();
+            return output.stream;
+          };
+        }, { forceMp4: process.env.E2E_MEDIA_FORMAT === 'mp4' });
+        await gotoSetup(page, frontendOrigin);
+        await saveKey(page, GOOD_KEY);
+        await page.getByRole('button', { name: 'Start recording' }).click();
+        await page.getByRole('button', { name: 'Stop recording' }).waitFor();
+        await delay(1200);
+        await page.getByRole('button', { name: 'Stop recording' }).click();
+        await waitForAssistant(page, /voice transcript from browser context/);
+        await assertEventually(async () => assert.ok(await page.evaluate(() => window.__mediaProbe.sourcesStarted > 0)), 'PCM playback should start');
+        assert.ok(provider.snapshot().calls.some((call) => call.url.includes('/audio/transcriptions')));
+        await page.evaluate(() => {
+          navigator.mediaDevices.getUserMedia = () => Promise.reject(new DOMException('Microphone permission denied.', 'NotAllowedError'));
+        });
+        await page.getByRole('button', { name: 'Start recording' }).click();
+        await expectText(page.locator('#status-bar'), 'Microphone permission denied.');
+        assert.equal(await page.getByRole('textbox', { name: 'Message' }).isEnabled(), true);
+        await assertNoDiagnostics(diagnostics, 'microphone and PCM', [GOOD_KEY]);
+      } finally { await context.close(); }
     }, artifacts);
 
     await runScenario(results, 'invalid visitor key recovers and browser contexts do not share keys', async () => {

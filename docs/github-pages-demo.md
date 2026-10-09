@@ -1,6 +1,6 @@
 # GitHub Pages demo with visitor keys
 
-The demo is live at **https://3bdrahman.github.io/virtual-assistant-demo/**, with its API at **https://virtual-assistant-pages-api.onrender.com/api**. See the [showcase screenshots and silent walkthrough](../README.md) for the current experience. The explicit real-provider browser check is described below.
+The demo is live at **https://3bdrahman.github.io/virtual-assistant-demo/**, with its API at **https://virtual-assistant-pages-api.onrender.com/api**. See the [showcase screenshots and voice walkthrough](../README.md) for the current experience. The explicit real-provider browser check is described below.
 
 Each visitor supplies a NVIDIA key; it stays in page memory, is sent in an Authorization header to the API relay, and is forwarded to the fixed NVIDIA endpoints. Reloading clears it. Changing or removing it also starts a new conversation. The Render free instance can need about a minute to wake; the page reconnects automatically.
 

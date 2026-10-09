@@ -2,7 +2,7 @@
 
 A live AI conversation with a 3D avatar. Type a question or record your voice; replies stream into the transcript and the avatar speaks them aloud. Responses come from the live provider, with Jason as the primary voice. In visitor-key mode, each visitor enters a NVIDIA key that is kept only in page memory.
 
-[Open the live demo](https://3bdrahman.github.io/virtual-assistant-demo/) · [Watch the silent real-provider walkthrough](../docs/showcase/demo.webm) · [View the live conversation screenshot](../docs/showcase/live-conversation.png)
+[Open the live demo](https://3bdrahman.github.io/virtual-assistant-demo/) · [Watch the real-provider voice walkthrough](../docs/showcase/demo.mp4) ([WebM alternative](../docs/showcase/demo.webm)) · [View the live conversation screenshot](../docs/showcase/live-conversation.png)
 
 ## Run locally
 
@@ -87,6 +87,8 @@ PLAYWRIGHT_MODULE=/absolute/path/to/playwright/index.mjs npm run test:pages
 ```
 
 If Playwright is already resolvable from the project, omit `PLAYWRIGHT_MODULE`. Optionally set `CHROMIUM_EXECUTABLE_PATH` for an existing Chromium binary and `E2E_ARTIFACT_DIR` for JSON results and screenshots. The harness starts an isolated local server, uses controlled provider responses, exercises real browser recording and streamed audio playback, and closes its servers and browser afterward. The streaming regression holds both chat and audio responses open and requires playback before either completes. These tests never call NVIDIA or change the server credential.
+
+`test:pages` also accepts `E2E_BROWSER=firefox` or `E2E_BROWSER=webkit` when the matching Playwright engine is installed. Its media scenario records a synthetic microphone stream with the browser's real `MediaRecorder` and checks transcription, PCM playback, and denied-permission recovery. `E2E_MEDIA_FORMAT=mp4 E2E_SCENARIO='recorded microphone'` exercises the MP4 recorder branch on a browser that supports it. See the [browser compatibility matrix](../docs/browser-compatibility.md) for the measured engines and remaining device checks.
 
 For an explicit live release check using the configured server key:
 
